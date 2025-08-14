@@ -58,9 +58,21 @@ def load_posts():
             for post in posts:
                 if post.get('time'):
                     try:
-                        post['time'] = datetime.fromisoformat(post['time'])
+                        # ISO形式の文字列をdatetimeに変換
+                        if isinstance(post['time'], str):
+                            # 'Z'が含まれる場合は除去
+                            time_str = post['time'].replace('Z', '')
+                            # ミリ秒が含まれる場合の対応
+                            if '.' in time_str:
+                                post['time'] = datetime.fromisoformat(time_str.split('.')[0])
+                            else:
+                                post['time'] = datetime.fromisoformat(time_str)
+                        elif not isinstance(post['time'], datetime):
+                            post['time'] = datetime.now()
                     except:
                         post['time'] = datetime.now()
+                else:
+                    post['time'] = datetime.now()
             return posts
         return []
     except:
@@ -198,22 +210,51 @@ with right_col:
         
         # 投稿一覧（最新10件）
         st.markdown("### 💬 最新の投稿")
+        
+        # 時刻でソートする前に、すべての時刻データを確実にdatetimeに変換
+        for post in posts:
+            if not isinstance(post.get('time'), datetime):
+                try:
+                    if isinstance(post.get('time'), str):
+                        time_str = post['time'].replace('Z', '')
+                        if '.' in time_str:
+                            post['time'] = datetime.fromisoformat(time_str.split('.')[0])
+                        else:
+                            post['time'] = datetime.fromisoformat(time_str)
+                    else:
+                        post['time'] = datetime.now()
+                except:
+                    post['time'] = datetime.now()
+        
         recent_posts = sorted(posts, key=lambda x: x.get('time', datetime.min), reverse=True)[:10]
         
         for post in recent_posts:
-            # 時間表示
-            post_time = post.get('time', datetime.now())
-            if isinstance(post_time, datetime):
-                now = datetime.now()
-                diff = now - post_time
-                if diff.total_seconds() < 60:
-                    time_str = f"{int(diff.total_seconds())}秒前"
-                elif diff.total_seconds() < 3600:
-                    time_str = f"{int(diff.total_seconds() / 60)}分前"
-                else:
-                    time_str = post_time.strftime('%H:%M')
+            # 時間表示の安全な処理
+            post_time = post.get('time')
+            
+            # post_timeが文字列の場合はdatetimeに変換を試行
+            if isinstance(post_time, str):
+                try:
+                    time_str = post_time.replace('Z', '')
+                    if '.' in time_str:
+                        post_time = datetime.fromisoformat(time_str.split('.')[0])
+                    else:
+                        post_time = datetime.fromisoformat(time_str)
+                except:
+                    post_time = datetime.now()
+            elif not isinstance(post_time, datetime):
+                post_time = datetime.now()
+            
+            # 時間差計算
+            now = datetime.now()
+            diff = now - post_time
+            
+            if diff.total_seconds() < 60:
+                time_str = f"{int(diff.total_seconds())}秒前"
+            elif diff.total_seconds() < 3600:
+                time_str = f"{int(diff.total_seconds() / 60)}分前"
             else:
-                time_str = "今"
+                time_str = post_time.strftime('%H:%M')
             
             # 投稿表示
             st.markdown(f"""
