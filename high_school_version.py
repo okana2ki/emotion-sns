@@ -114,12 +114,23 @@ def clear_all_posts():
             # Google Sheetsのデータを削除するための特別なリクエスト
             clear_url = GAS_URL + "?action=clear"
             response = requests.get(clear_url, timeout=10)
-            return response.status_code == 200
+            
+            # 成功した場合、ローカルのSession Stateもクリア
+            if response.status_code == 200:
+                if 'posts' in st.session_state:
+                    del st.session_state['posts']
+                # 確認フラグもリセット
+                if 'confirm_clear' in st.session_state:
+                    del st.session_state['confirm_clear']
+                return True
+            return False
         except:
             return False
     else:
         # ローカルデータをクリア
         st.session_state.posts = []
+        if 'confirm_clear' in st.session_state:
+            del st.session_state['confirm_clear']
         return True
 
 # メインアプリ
@@ -162,18 +173,34 @@ with st.sidebar:
     if admin_password == st.secrets.get("admin_password", "opencampus2024"):
         st.success("✅ 管理者として認証されました")
         
-        if st.button("🗑️ 全データを削除", type="secondary"):
-            if st.session_state.get('confirm_clear', False):
-                if clear_all_posts():
-                    st.success("✅ 全データを削除しました")
-                    st.session_state.confirm_clear = False
-                    time.sleep(1)
-                    st.rerun()
+        # データクリア機能
+        col_clear1, col_clear2 = st.columns(2)
+        
+        with col_clear1:
+            if st.button("🗑️ 全データを削除", type="secondary"):
+                if st.session_state.get('confirm_clear', False):
+                    with st.spinner("データを削除中..."):
+                        if clear_all_posts():
+                            st.success("✅ 全データを削除しました")
+                            st.session_state.confirm_clear = False
+                            # 強制的にページを再読み込み
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error("❌ 削除に失敗しました")
+                            st.session_state.confirm_clear = False
                 else:
-                    st.error("❌ 削除に失敗しました")
-            else:
-                st.warning("⚠️ もう一度クリックで確定")
-                st.session_state.confirm_clear = True
+                    st.warning("⚠️ もう一度クリックで確定")
+                    st.session_state.confirm_clear = True
+        
+        with col_clear2:
+            if st.button("🔄 キャッシュクリア", type="secondary"):
+                # Session Stateを完全にクリア
+                for key in list(st.session_state.keys()):
+                    if key.startswith('posts') or key == 'posts':
+                        del st.session_state[key]
+                st.success("✅ キャッシュをクリアしました")
+                st.rerun()
         
         # データエクスポート
         if posts:
