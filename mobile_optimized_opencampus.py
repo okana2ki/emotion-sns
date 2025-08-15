@@ -12,14 +12,6 @@ def clear_all_posts():
                     del st.session_state['confirm_clear']
                 load_posts.clear()
                 return True
-            return False
-        except:
-            return False
-    else:
-        st.session_state.posts = []
-        if 'confirm_clear' in st.session_state:
-            del st.session_state['confirm_clear']
-        return True
 
 # 日本語化用のJS（入力欄のプレースホルダー対応）
 st.markdown("""
@@ -41,6 +33,16 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 </script>
 """, unsafe_allow_html=True)
+
+# メインアプリ
+            return False
+        except:
+            return False
+    else:
+        st.session_state.posts = []
+        if 'confirm_clear' in st.session_state:
+            del st.session_state['confirm_clear']
+        return True
 st.title("🎓 オープンキャンパス感想SNS")
 st.markdown("**今日のオープンキャンパスはいかがでしたか？AI（Gemini 2.5）が高精度に感想を分析します！**")
 
