@@ -1,17 +1,110 @@
-def clear_all_posts():
-    """すべての投稿をクリア"""
-    if GAS_URL:
-        try:
-            clear_url = GAS_URL + "?action=clear"
-            response = requests.get(clear_url, timeout=10)
-            
-            if response.status_code == 200:
-                if 'posts' in st.session_state:
-                    del st.session_state['posts']
-                if 'confirm_clear' in st.session_state:
-                    del st.session_state['confirm_clear']
-                load_posts.clear()
-                return True
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from datetime import datetime
+import json
+import requests
+import time
+from google import genai
+from google.genai import types
+import traceback
+import os
+
+# ページ設定
+st.set_page_config(page_title="オープンキャンパス感想SNS", page_icon="🎓", layout="wide")
+
+# カスタムCSS（スマホ対応・日本語表示）
+st.markdown("""
+<style>
+/* 入力欄のプレースホルダーとヘルプテキストを日本語化 */
+.stTextInput > div > div > div > input::placeholder {
+    color: #999;
+}
+
+.stTextArea > div > div > div > textarea::placeholder {
+    color: #999;
+}
+
+/* スマホでのテキスト表示改善 */
+.post-card {
+    border-left: 5px solid var(--border-color);
+    padding: 15px;
+    margin: 10px 0;
+    background-color: #f8f9fa;
+    border-radius: 10px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    line-height: 1.6;
+}
+
+.post-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+}
+
+.post-user {
+    font-weight: bold;
+    font-size: 14px;
+    color: #333;
+}
+
+.post-time {
+    font-size: 12px;
+    color: #666;
+    white-space: nowrap;
+}
+
+.post-emotion {
+    font-weight: bold;
+    margin: 8px 0;
+    font-size: 16px;
+}
+
+.post-text {
+    font-size: 15px;
+    margin-top: 10px;
+    line-height: 1.5;
+    color: #333;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.post-analysis {
+    margin-top: 8px;
+    font-size: 12px;
+    color: #666;
+    line-height: 1.4;
+}
+
+/* スマホでのボタン改善 */
+@media (max-width: 768px) {
+    .stButton > button {
+        width: 100%;
+        padding: 12px;
+        font-size: 16px;
+    }
+    
+    .post-card {
+        margin: 8px 0;
+        padding: 12px;
+    }
+    
+    .post-text {
+        font-size: 14px;
+    }
+}
+
+/* Plotlyグラフのツールバー簡略化 */
+.modebar {
+    display: none !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # 日本語化用のJS（入力欄のプレースホルダー対応）
 st.markdown("""
@@ -34,7 +127,391 @@ document.addEventListener('DOMContentLoaded', function() {
 </script>
 """, unsafe_allow_html=True)
 
-# メインアプリ
+# セッション状態の初期化
+if 'last_update' not in st.session_state:
+    st.session_state.last_update = datetime.now()
+if 'is_posting' not in st.session_state:
+    st.session_state.is_posting = False
+if 'show_success' not in st.session_state:
+    st.session_state.show_success = False
+if 'auto_update_enabled' not in st.session_state:
+    st.session_state.auto_update_enabled = True
+if 'gemini_debug' not in st.session_state:
+    st.session_state.gemini_debug = False
+if 'analysis_result' not in st.session_state:
+    st.session_state.analysis_result = None
+if 'analysis_done' not in st.session_state:
+    st.session_state.analysis_done = False
+
+# デバッグモード切り替え
+DEBUG_MODE = st.secrets.get("debug_mode", False)
+
+# Gemini API設定（新SDK対応）
+@st.cache_resource
+def setup_gemini():
+    """新SDK（google-genai）を使ったGemini APIの設定"""
+    api_key = st.secrets.get("gemini_api_key", "")
+    
+    if not api_key:
+        if DEBUG_MODE:
+            st.error("🚨 Gemini API keyが設定されていません。secrets.tomlに'gemini_api_key'を追加してください。")
+        return None, "API key not found", None
+    
+    try:
+        # 環境変数にAPI keyを設定（新SDKの要件）
+        os.environ['GEMINI_API_KEY'] = api_key
+        
+        # 新SDKでクライアントを作成
+        client = genai.Client()
+        
+        # 推奨モデルでAPI接続テスト
+        try:
+            test_response = client.models.generate_content(
+                model="gemini-2.5-flash-lite",
+                contents="テスト接続"
+            )
+            return client, "gemini-2.5-flash-lite: API connection successful", "gemini-2.5-flash-lite"
+        except Exception as primary_error:
+            if DEBUG_MODE:
+                st.warning(f"⚠️ gemini-2.5-flash-lite が利用できません: {primary_error}")
+            
+            # フォールバックモデル（gemini-2.0-flash-lite）
+            try:
+                test_response = client.models.generate_content(
+                    model="gemini-2.0-flash-lite", 
+                    contents="テスト接続"
+                )
+                return client, "gemini-2.0-flash-lite: Using fallback model", "gemini-2.0-flash-lite"
+            except Exception as fallback_error:
+                if DEBUG_MODE:
+                    st.error(f"❌ フォールバックモデルも利用できません: {fallback_error}")
+                return None, f"Both models failed: {primary_error}, {fallback_error}", None
+            
+    except Exception as e:
+        error_msg = f"Gemini client setup error: {str(e)}"
+        if DEBUG_MODE:
+            st.error(f"🚨 Gemini クライアント設定エラー: {error_msg}")
+            st.code(traceback.format_exc())
+        return None, error_msg, None
+
+def analyze_sentiment_with_llm(text, client, model_name="gemini-2.5-flash-lite"):
+    """新SDK（google-genai）を使った高精度感情分析"""
+    if not client:
+        if DEBUG_MODE:
+            st.warning("⚠️ Gemini client is None, using fallback analysis")
+        return simple_sentiment_analysis_fallback(text)
+    
+    try:
+        # システム指示（オープンキャンパス特化）
+        system_instruction = """
+あなたはオープンキャンパスの感想分析専門AIです。
+高校生の感想文を分析して、感情スコアと詳細な感情状態を正確に判定してください。
+オープンキャンパス特有の要素（施設見学、模擬授業、学生との交流、進路への影響など）を重視して分析してください。
+出力は必ずJSON形式で行い、追加の説明は含めないでください。
+"""
+        
+        # プロンプト
+        prompt = f"""
+以下のオープンキャンパスに関する感想文を分析してください。
+
+【感想文】
+{text}
+
+【出力形式】
+以下のJSON形式のみで回答してください：
+{{
+    "score": [0-100の整数スコア],
+    "emotion": "[感情表現]",
+    "reason": "[判定理由の簡潔な説明]",
+    "keywords": ["抽出されたポジティブ/ネガティブキーワード"]
+}}
+
+【スコア基準】
+- 90-100: 非常にポジティブ（入学への強い意欲、深い感動）
+- 70-89: ポジティブ（満足、興味、好印象）
+- 50-69: やや良好（普通に良い、まずまず）
+- 30-49: 中立・混在（迷い、どちらでもない）
+- 10-29: やや不満（期待外れ、不安）
+- 0-9: 非常にネガティブ（強い不満、失望）
+
+【感情表現例】
+- 😍 大感動: 90-100点
+- 😊 とても満足: 75-89点
+- 🙂 満足: 60-74点
+- 😐 普通: 45-59点
+- 😞 やや不満: 25-44点
+- 😢 不満: 0-24点
+"""
+        
+        if DEBUG_MODE:
+            st.info(f"🔍 Gemini APIにリクエスト送信中... (モデル: {model_name})")
+        
+        # 新SDKでAPIリクエスト
+        response = client.models.generate_content(
+            model=model_name,
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction
+            ),
+            contents=prompt
+        )
+        
+        if DEBUG_MODE:
+            st.success("✅ Gemini APIから応答受信")
+            with st.expander("📄 Gemini生レスポンス"):
+                st.code(response.text)
+        
+        # JSONパースを試行
+        try:
+            response_text = response.text.strip()
+            
+            # ```json を除去する処理
+            if "```json" in response_text:
+                response_text = response_text.split("```json")[1].split("```")[0].strip()
+            elif "```" in response_text:
+                response_text = response_text.split("```")[1].strip()
+            
+            if DEBUG_MODE:
+                st.info("🔧 JSON抽出結果:")
+                st.code(response_text)
+            
+            result = json.loads(response_text)
+            
+            # 結果の検証
+            required_keys = ['score', 'emotion']
+            for key in required_keys:
+                if key not in result:
+                    raise KeyError(f"Required key '{key}' not found in response")
+            
+            final_result = {
+                'score': int(result.get('score', 50)),
+                'emotion': result.get('emotion', '😐 普通'),
+                'reason': result.get('reason', f'Gemini {model_name} による詳細分析'),
+                'keywords': result.get('keywords', [])
+            }
+            
+            if DEBUG_MODE:
+                st.success("✅ JSON解析成功")
+                st.json(final_result)
+            
+            return final_result
+            
+        except (json.JSONDecodeError, ValueError, KeyError) as parse_error:
+            if DEBUG_MODE:
+                st.warning(f"⚠️ JSON解析エラー: {parse_error}")
+                st.info("🔄 フォールバック解析を実行中...")
+            return parse_llm_response_fallback(response.text, text, model_name)
+            
+    except Exception as e:
+        error_msg = f"LLM analysis error: {str(e)}"
+        if DEBUG_MODE:
+            st.error(f"❌ Gemini API エラー: {error_msg}")
+            st.code(traceback.format_exc())
+        
+        # レート制限エラーの場合は特別な処理
+        if "429" in str(e) or "quota" in str(e).lower():
+            if DEBUG_MODE:
+                st.error("🚨 レート制限に達しました。フォールバック分析を使用します。")
+            # フォールバックモデルを試行
+            if model_name == "gemini-2.5-flash-lite":
+                return analyze_sentiment_with_llm(text, client, "gemini-2.0-flash-lite")
+        
+        return simple_sentiment_analysis_fallback(text)
+
+def parse_llm_response_fallback(response_text, original_text, model_name):
+    """LLM応答のパースに失敗した場合のフォールバック"""
+    try:
+        import re
+        
+        if DEBUG_MODE:
+            st.info("🔧 テキスト解析フォールバック実行中...")
+        
+        # スコアを正規表現で抽出
+        score_patterns = [
+            r'(?:score|スコア)[":：]\s*(\d+)',
+            r'(\d{1,3})\s*点',
+            r'(\d{1,3})\s*pts?'
+        ]
+        
+        score = 50  # デフォルト
+        for pattern in score_patterns:
+            score_match = re.search(pattern, response_text, re.IGNORECASE)
+            if score_match:
+                score = int(score_match.group(1))
+                break
+        
+        # 感情表現を抽出
+        emotion_patterns = [
+            r'[😍😊🙂😐😞😢][^0-9\n]*',
+            r'(大感動|とても満足|満足|普通|やや不満|不満)',
+            r'emotion[":：]\s*"([^"]*)"'
+        ]
+        
+        emotion = "😐 普通"
+        for pattern in emotion_patterns:
+            match = re.search(pattern, response_text, re.IGNORECASE)
+            if match:
+                emotion = match.group(0).strip()
+                break
+        
+        # スコアに基づく感情補正
+        if score >= 90:
+            emotion = "😍 大感動"
+        elif score >= 75:
+            emotion = "😊 とても満足"
+        elif score >= 60:
+            emotion = "🙂 満足"
+        elif score >= 45:
+            emotion = "😐 普通"
+        elif score >= 25:
+            emotion = "😞 やや不満"
+        else:
+            emotion = "😢 不満"
+        
+        result = {
+            'score': max(0, min(100, score)),
+            'emotion': emotion,
+            'reason': f'Gemini {model_name} の部分解析',
+            'keywords': []
+        }
+        
+        if DEBUG_MODE:
+            st.success("✅ テキスト解析フォールバック成功")
+            st.json(result)
+        
+        return result
+        
+    except Exception as e:
+        if DEBUG_MODE:
+            st.error(f"❌ テキスト解析フォールバックエラー: {e}")
+        return simple_sentiment_analysis_fallback(original_text)
+
+def simple_sentiment_analysis_fallback(text):
+    """フォールバック用のシンプル分析"""
+    if DEBUG_MODE:
+        st.warning("⚠️ キーワードベース分析にフォールバック")
+    
+    positive_words = [
+        '楽しい', '嬉しい', '最高', '良い', 'すごい', 'がんばる', '頑張る', 
+        '感動', '素晴らしい', 'ありがとう', '大好き', '幸せ', 'やったー',
+        '成功', '合格', '勝利', '達成', '完璧', '満足', 'ワクワク',
+        '興味深い', '面白い', '魅力的', '素敵', 'かっこいい', '美しい',
+        '充実', '発見', '学べる', '勉強になる', '将来', '夢', '希望',
+        '入学したい', '通いたい', '憧れ', '目標', 'やる気', 'モチベーション'
+    ]
+    
+    negative_words = [
+        '悲しい', '辛い', '大変', '不安', '心配', '疲れた', 'つまらない', 
+        '嫌', '困った', 'ダメ', '失敗', '最悪', 'むかつく', 'イライラ',
+        '落ち込む', 'がっかり', '残念', '苦しい', '難しい', '分からない',
+        '迷う', '悩む', '微妙'
+    ]
+    
+    positive_count = sum(1 for word in positive_words if word in text)
+    negative_count = sum(1 for word in negative_words if word in text)
+    
+    if positive_count > negative_count:
+        score = 50 + (positive_count * 10)
+    elif negative_count > positive_count:
+        score = 50 - (negative_count * 10)
+    else:
+        score = 50
+    
+    score = max(0, min(100, score))
+    
+    if score >= 75:
+        emotion = "😊 とても満足"
+    elif score >= 60:
+        emotion = "🙂 満足"
+    elif score >= 40:
+        emotion = "😐 普通"
+    elif score >= 25:
+        emotion = "😞 やや不満"
+    else:
+        emotion = "😢 不満"
+    
+    return {
+        'score': score,
+        'emotion': emotion,
+        'reason': 'キーワードベース分析（フォールバック）',
+        'keywords': []
+    }
+
+# Google Apps Script URL
+GAS_URL = st.secrets.get("gas_url", "")
+
+@st.cache_data(ttl=30)
+def load_posts():
+    """投稿を読み込み（キャッシュ付き）"""
+    if not GAS_URL:
+        return st.session_state.get('posts', [])
+    
+    try:
+        response = requests.get(GAS_URL, timeout=5)
+        if response.status_code == 200:
+            posts = response.json()
+            for post in posts:
+                if post.get('time'):
+                    try:
+                        if isinstance(post['time'], str):
+                            time_str = post['time'].replace('Z', '')
+                            if '.' in time_str:
+                                post['time'] = datetime.fromisoformat(time_str.split('.')[0])
+                            else:
+                                post['time'] = datetime.fromisoformat(time_str)
+                        elif not isinstance(post['time'], datetime):
+                            post['time'] = datetime.now()
+                    except:
+                        post['time'] = datetime.now()
+                else:
+                    post['time'] = datetime.now()
+            return posts
+        return []
+    except:
+        return st.session_state.get('posts', [])
+
+def save_post(nickname, text, score, emotion, reason, keywords, color):
+    """投稿を保存（非同期対応）"""
+    post_data = {
+        'user': nickname,
+        'text': text,
+        'sentiment': score,
+        'emotion': emotion,
+        'reason': reason,
+        'keywords': keywords,
+        'time': datetime.now().isoformat(),
+        'color': color
+    }
+    
+    if GAS_URL:
+        try:
+            response = requests.post(GAS_URL, json=post_data, timeout=5)
+            success = response.status_code == 200
+            if success:
+                load_posts.clear()
+            return success
+        except:
+            return False
+    else:
+        if 'posts' not in st.session_state:
+            st.session_state.posts = []
+        post_data['time'] = datetime.now()
+        st.session_state.posts.append(post_data)
+        return True
+
+def clear_all_posts():
+    """すべての投稿をクリア"""
+    if GAS_URL:
+        try:
+            clear_url = GAS_URL + "?action=clear"
+            response = requests.get(clear_url, timeout=10)
+            
+            if response.status_code == 200:
+                if 'posts' in st.session_state:
+                    del st.session_state['posts']
+                if 'confirm_clear' in st.session_state:
+                    del st.session_state['confirm_clear']
+                load_posts.clear()
+                return True
             return False
         except:
             return False
@@ -43,6 +520,8 @@ document.addEventListener('DOMContentLoaded', function() {
         if 'confirm_clear' in st.session_state:
             del st.session_state['confirm_clear']
         return True
+
+# メインアプリ
 st.title("🎓 オープンキャンパス感想SNS")
 st.markdown("**今日のオープンキャンパスはいかがでしたか？AI（Gemini 2.5）が高精度に感想を分析します！**")
 
@@ -566,483 +1045,4 @@ st.markdown("""
     <small>画面が固まる場合は、サイドバーで「自動更新」をオフにしてください</small><br>
     ご参加いただき、ありがとうございました！
 </div>
-""", unsafe_allow_html=True)import streamlit as st
-import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
-from datetime import datetime
-import json
-import requests
-import time
-from google import genai
-from google.genai import types
-import traceback
-import os
-
-# ページ設定
-st.set_page_config(page_title="オープンキャンパス感想SNS", page_icon="🎓", layout="wide")
-
-# カスタムCSS（スマホ対応・日本語表示）
-st.markdown("""
-<style>
-/* 入力欄のプレースホルダーとヘルプテキストを日本語化 */
-.stTextInput > div > div > div > input::placeholder {
-    color: #999;
-}
-
-.stTextArea > div > div > div > textarea::placeholder {
-    color: #999;
-}
-
-/* スマホでのテキスト表示改善 */
-.post-card {
-    border-left: 5px solid var(--border-color);
-    padding: 15px;
-    margin: 10px 0;
-    background-color: #f8f9fa;
-    border-radius: 10px;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    word-wrap: break-word;
-    overflow-wrap: break-word;
-    line-height: 1.6;
-}
-
-.post-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 8px;
-    flex-wrap: wrap;
-}
-
-.post-user {
-    font-weight: bold;
-    font-size: 14px;
-    color: #333;
-}
-
-.post-time {
-    font-size: 12px;
-    color: #666;
-    white-space: nowrap;
-}
-
-.post-emotion {
-    font-weight: bold;
-    margin: 8px 0;
-    font-size: 16px;
-}
-
-.post-text {
-    font-size: 15px;
-    margin-top: 10px;
-    line-height: 1.5;
-    color: #333;
-    white-space: pre-wrap;
-    word-break: break-word;
-}
-
-.post-analysis {
-    margin-top: 8px;
-    font-size: 12px;
-    color: #666;
-    line-height: 1.4;
-}
-
-/* スマホでのボタン改善 */
-@media (max-width: 768px) {
-    .stButton > button {
-        width: 100%;
-        padding: 12px;
-        font-size: 16px;
-    }
-    
-    .post-card {
-        margin: 8px 0;
-        padding: 12px;
-    }
-    
-    .post-text {
-        font-size: 14px;
-    }
-}
-
-/* Plotlyグラフのツールバー簡略化 */
-.modebar {
-    display: none !important;
-}
-</style>
 """, unsafe_allow_html=True)
-
-# セッション状態の初期化
-if 'last_update' not in st.session_state:
-    st.session_state.last_update = datetime.now()
-if 'is_posting' not in st.session_state:
-    st.session_state.is_posting = False
-if 'show_success' not in st.session_state:
-    st.session_state.show_success = False
-if 'auto_update_enabled' not in st.session_state:
-    st.session_state.auto_update_enabled = True
-if 'gemini_debug' not in st.session_state:
-    st.session_state.gemini_debug = False
-if 'analysis_result' not in st.session_state:
-    st.session_state.analysis_result = None
-if 'analysis_done' not in st.session_state:
-    st.session_state.analysis_done = False
-
-# デバッグモード切り替え
-DEBUG_MODE = st.secrets.get("debug_mode", False)
-
-# Gemini API設定（新SDK対応）
-@st.cache_resource
-def setup_gemini():
-    """新SDK（google-genai）を使ったGemini APIの設定"""
-    api_key = st.secrets.get("gemini_api_key", "")
-    
-    if not api_key:
-        if DEBUG_MODE:
-            st.error("🚨 Gemini API keyが設定されていません。secrets.tomlに'gemini_api_key'を追加してください。")
-        return None, "API key not found", None
-    
-    try:
-        # 環境変数にAPI keyを設定（新SDKの要件）
-        os.environ['GEMINI_API_KEY'] = api_key
-        
-        # 新SDKでクライアントを作成
-        client = genai.Client()
-        
-        # 推奨モデルでAPI接続テスト
-        try:
-            test_response = client.models.generate_content(
-                model="gemini-2.5-flash-lite",
-                contents="テスト接続"
-            )
-            return client, "gemini-2.5-flash-lite: API connection successful", "gemini-2.5-flash-lite"
-        except Exception as primary_error:
-            if DEBUG_MODE:
-                st.warning(f"⚠️ gemini-2.5-flash-lite が利用できません: {primary_error}")
-            
-            # フォールバックモデル（gemini-2.0-flash-lite）
-            try:
-                test_response = client.models.generate_content(
-                    model="gemini-2.0-flash-lite", 
-                    contents="テスト接続"
-                )
-                return client, "gemini-2.0-flash-lite: Using fallback model", "gemini-2.0-flash-lite"
-            except Exception as fallback_error:
-                if DEBUG_MODE:
-                    st.error(f"❌ フォールバックモデルも利用できません: {fallback_error}")
-                return None, f"Both models failed: {primary_error}, {fallback_error}", None
-            
-    except Exception as e:
-        error_msg = f"Gemini client setup error: {str(e)}"
-        if DEBUG_MODE:
-            st.error(f"🚨 Gemini クライアント設定エラー: {error_msg}")
-            st.code(traceback.format_exc())
-        return None, error_msg, None
-
-def analyze_sentiment_with_llm(text, client, model_name="gemini-2.5-flash-lite"):
-    """新SDK（google-genai）を使った高精度感情分析"""
-    if not client:
-        if DEBUG_MODE:
-            st.warning("⚠️ Gemini client is None, using fallback analysis")
-        return simple_sentiment_analysis_fallback(text)
-    
-    try:
-        # システム指示（オープンキャンパス特化）
-        system_instruction = """
-あなたはオープンキャンパスの感想分析専門AIです。
-高校生の感想文を分析して、感情スコアと詳細な感情状態を正確に判定してください。
-オープンキャンパス特有の要素（施設見学、模擬授業、学生との交流、進路への影響など）を重視して分析してください。
-出力は必ずJSON形式で行い、追加の説明は含めないでください。
-"""
-        
-        # プロンプト
-        prompt = f"""
-以下のオープンキャンパスに関する感想文を分析してください。
-
-【感想文】
-{text}
-
-【出力形式】
-以下のJSON形式のみで回答してください：
-{{
-    "score": [0-100の整数スコア],
-    "emotion": "[感情表現]",
-    "reason": "[判定理由の簡潔な説明]",
-    "keywords": ["抽出されたポジティブ/ネガティブキーワード"]
-}}
-
-【スコア基準】
-- 90-100: 非常にポジティブ（入学への強い意欲、深い感動）
-- 70-89: ポジティブ（満足、興味、好印象）
-- 50-69: やや良好（普通に良い、まずまず）
-- 30-49: 中立・混在（迷い、どちらでもない）
-- 10-29: やや不満（期待外れ、不安）
-- 0-9: 非常にネガティブ（強い不満、失望）
-
-【感情表現例】
-- 😍 大感動: 90-100点
-- 😊 とても満足: 75-89点
-- 🙂 満足: 60-74点
-- 😐 普通: 45-59点
-- 😞 やや不満: 25-44点
-- 😢 不満: 0-24点
-"""
-        
-        if DEBUG_MODE:
-            st.info(f"🔍 Gemini APIにリクエスト送信中... (モデル: {model_name})")
-        
-        # 新SDKでAPIリクエスト
-        response = client.models.generate_content(
-            model=model_name,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction
-            ),
-            contents=prompt
-        )
-        
-        if DEBUG_MODE:
-            st.success("✅ Gemini APIから応答受信")
-            with st.expander("📄 Gemini生レスポンス"):
-                st.code(response.text)
-        
-        # JSONパースを試行
-        try:
-            response_text = response.text.strip()
-            
-            # ```json を除去する処理
-            if "```json" in response_text:
-                response_text = response_text.split("```json")[1].split("```")[0].strip()
-            elif "```" in response_text:
-                response_text = response_text.split("```")[1].strip()
-            
-            if DEBUG_MODE:
-                st.info("🔧 JSON抽出結果:")
-                st.code(response_text)
-            
-            result = json.loads(response_text)
-            
-            # 結果の検証
-            required_keys = ['score', 'emotion']
-            for key in required_keys:
-                if key not in result:
-                    raise KeyError(f"Required key '{key}' not found in response")
-            
-            final_result = {
-                'score': int(result.get('score', 50)),
-                'emotion': result.get('emotion', '😐 普通'),
-                'reason': result.get('reason', f'Gemini {model_name} による詳細分析'),
-                'keywords': result.get('keywords', [])
-            }
-            
-            if DEBUG_MODE:
-                st.success("✅ JSON解析成功")
-                st.json(final_result)
-            
-            return final_result
-            
-        except (json.JSONDecodeError, ValueError, KeyError) as parse_error:
-            if DEBUG_MODE:
-                st.warning(f"⚠️ JSON解析エラー: {parse_error}")
-                st.info("🔄 フォールバック解析を実行中...")
-            return parse_llm_response_fallback(response.text, text, model_name)
-            
-    except Exception as e:
-        error_msg = f"LLM analysis error: {str(e)}"
-        if DEBUG_MODE:
-            st.error(f"❌ Gemini API エラー: {error_msg}")
-            st.code(traceback.format_exc())
-        
-        # レート制限エラーの場合は特別な処理
-        if "429" in str(e) or "quota" in str(e).lower():
-            if DEBUG_MODE:
-                st.error("🚨 レート制限に達しました。フォールバック分析を使用します。")
-            # フォールバックモデルを試行
-            if model_name == "gemini-2.5-flash-lite":
-                return analyze_sentiment_with_llm(text, client, "gemini-2.0-flash-lite")
-        
-        return simple_sentiment_analysis_fallback(text)
-
-def parse_llm_response_fallback(response_text, original_text, model_name):
-    """LLM応答のパースに失敗した場合のフォールバック"""
-    try:
-        import re
-        
-        if DEBUG_MODE:
-            st.info("🔧 テキスト解析フォールバック実行中...")
-        
-        # スコアを正規表現で抽出
-        score_patterns = [
-            r'(?:score|スコア)[":：]\s*(\d+)',
-            r'(\d{1,3})\s*点',
-            r'(\d{1,3})\s*pts?'
-        ]
-        
-        score = 50  # デフォルト
-        for pattern in score_patterns:
-            score_match = re.search(pattern, response_text, re.IGNORECASE)
-            if score_match:
-                score = int(score_match.group(1))
-                break
-        
-        # 感情表現を抽出
-        emotion_patterns = [
-            r'[😍😊🙂😐😞😢][^0-9\n]*',
-            r'(大感動|とても満足|満足|普通|やや不満|不満)',
-            r'emotion[":：]\s*"([^"]*)"'
-        ]
-        
-        emotion = "😐 普通"
-        for pattern in emotion_patterns:
-            match = re.search(pattern, response_text, re.IGNORECASE)
-            if match:
-                emotion = match.group(0).strip()
-                break
-        
-        # スコアに基づく感情補正
-        if score >= 90:
-            emotion = "😍 大感動"
-        elif score >= 75:
-            emotion = "😊 とても満足"
-        elif score >= 60:
-            emotion = "🙂 満足"
-        elif score >= 45:
-            emotion = "😐 普通"
-        elif score >= 25:
-            emotion = "😞 やや不満"
-        else:
-            emotion = "😢 不満"
-        
-        result = {
-            'score': max(0, min(100, score)),
-            'emotion': emotion,
-            'reason': f'Gemini {model_name} の部分解析',
-            'keywords': []
-        }
-        
-        if DEBUG_MODE:
-            st.success("✅ テキスト解析フォールバック成功")
-            st.json(result)
-        
-        return result
-        
-    except Exception as e:
-        if DEBUG_MODE:
-            st.error(f"❌ テキスト解析フォールバックエラー: {e}")
-        return simple_sentiment_analysis_fallback(original_text)
-
-def simple_sentiment_analysis_fallback(text):
-    """フォールバック用のシンプル分析"""
-    if DEBUG_MODE:
-        st.warning("⚠️ キーワードベース分析にフォールバック")
-    
-    positive_words = [
-        '楽しい', '嬉しい', '最高', '良い', 'すごい', 'がんばる', '頑張る', 
-        '感動', '素晴らしい', 'ありがとう', '大好き', '幸せ', 'やったー',
-        '成功', '合格', '勝利', '達成', '完璧', '満足', 'ワクワク',
-        '興味深い', '面白い', '魅力的', '素敵', 'かっこいい', '美しい',
-        '充実', '発見', '学べる', '勉強になる', '将来', '夢', '希望',
-        '入学したい', '通いたい', '憧れ', '目標', 'やる気', 'モチベーション'
-    ]
-    
-    negative_words = [
-        '悲しい', '辛い', '大変', '不安', '心配', '疲れた', 'つまらない', 
-        '嫌', '困った', 'ダメ', '失敗', '最悪', 'むかつく', 'イライラ',
-        '落ち込む', 'がっかり', '残念', '苦しい', '難しい', '分からない',
-        '迷う', '悩む', '微妙'
-    ]
-    
-    positive_count = sum(1 for word in positive_words if word in text)
-    negative_count = sum(1 for word in negative_words if word in text)
-    
-    if positive_count > negative_count:
-        score = 50 + (positive_count * 10)
-    elif negative_count > positive_count:
-        score = 50 - (negative_count * 10)
-    else:
-        score = 50
-    
-    score = max(0, min(100, score))
-    
-    if score >= 75:
-        emotion = "😊 とても満足"
-    elif score >= 60:
-        emotion = "🙂 満足"
-    elif score >= 40:
-        emotion = "😐 普通"
-    elif score >= 25:
-        emotion = "😞 やや不満"
-    else:
-        emotion = "😢 不満"
-    
-    return {
-        'score': score,
-        'emotion': emotion,
-        'reason': 'キーワードベース分析（フォールバック）',
-        'keywords': []
-    }
-
-# Google Apps Script URL
-GAS_URL = st.secrets.get("gas_url", "")
-
-@st.cache_data(ttl=30)
-def load_posts():
-    """投稿を読み込み（キャッシュ付き）"""
-    if not GAS_URL:
-        return st.session_state.get('posts', [])
-    
-    try:
-        response = requests.get(GAS_URL, timeout=5)
-        if response.status_code == 200:
-            posts = response.json()
-            for post in posts:
-                if post.get('time'):
-                    try:
-                        if isinstance(post['time'], str):
-                            time_str = post['time'].replace('Z', '')
-                            if '.' in time_str:
-                                post['time'] = datetime.fromisoformat(time_str.split('.')[0])
-                            else:
-                                post['time'] = datetime.fromisoformat(time_str)
-                        elif not isinstance(post['time'], datetime):
-                            post['time'] = datetime.now()
-                    except:
-                        post['time'] = datetime.now()
-                else:
-                    post['time'] = datetime.now()
-            return posts
-        return []
-    except:
-        return st.session_state.get('posts', [])
-
-def save_post(nickname, text, score, emotion, reason, keywords, color):
-    """投稿を保存（非同期対応）"""
-    post_data = {
-        'user': nickname,
-        'text': text,
-        'sentiment': score,
-        'emotion': emotion,
-        'reason': reason,
-        'keywords': keywords,
-        'time': datetime.now().isoformat(),
-        'color': color
-    }
-    
-    if GAS_URL:
-        try:
-            response = requests.post(GAS_URL, json=post_data, timeout=5)
-            success = response.status_code == 200
-            if success:
-                load_posts.clear()
-            return success
-        except:
-            return False
-    else:
-        if 'posts' not in st.session_state:
-            st.session_state.posts = []
-        post_data['time'] = datetime.now()
-        st.session_state.posts.append(post_data)
-        return True
-
-def clear_all
