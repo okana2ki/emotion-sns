@@ -748,18 +748,19 @@ with left_col:
         if keywords:
             st.markdown(f"**🔍 キーワード:** {', '.join(keywords)}")
         
-        # プレビュー
+        # プレビュー（スマホ対応修正）
         st.markdown(f"""
-        <div style="
-            border-left: 5px solid {color}; 
-            padding: 15px; 
-            background-color: #f8f9fa;
-            border-radius: 10px;
-            margin: 10px 0;
-        ">
-            <strong>👤 {nickname}</strong><br>
-            <span style="color: {color}; font-weight: bold;">{emotion} ({score}点)</span><br>
-            <div style="margin-top: 10px; font-size: 16px;">{message}</div>
+        <div class="post-card" style="--border-color: {color};">
+            <div class="post-header">
+                <span class="post-user">👤 {nickname}</span>
+                <span class="post-time">⏰ 分析完了</span>
+            </div>
+            <div class="post-emotion" style="color: {color};">
+                {emotion} ({score}点)
+            </div>
+            <div class="post-text">
+                💬 {message}
+            </div>
         </div>
         """, unsafe_allow_html=True)
         
@@ -917,83 +918,85 @@ with right_col:
             df = df.sort_values('time')
             df['感想順'] = range(1, len(df) + 1)
             
-            # スマホ対応のグラフ設定
-            fig = go.Figure()
+            # スマホ対応のグラフ設定（エラー修正）
+            try:
+                fig = go.Figure()
+                
+                # 満足度ラインの追加
+                fig.add_hline(y=50, line_dash="dash", line_color="gray", 
+                             annotation_text="普通(50点)", annotation_position="bottom right")
+                fig.add_hline(y=60, line_dash="dot", line_color="green", 
+                             annotation_text="満足ライン(60点)", annotation_position="top right")
+                
+                # メインデータの追加
+                fig.add_trace(go.Scatter(
+                    x=df['感想順'],
+                    y=df['sentiment'],
+                    mode='lines+markers',
+                    name='満足度スコア',
+                    line=dict(color='#1f77b4', width=3),
+                    marker=dict(size=8, color='#1f77b4'),
+                    hovertemplate='<b>%{customdata[0]}</b><br>' +
+                                 '満足度: %{y}点<br>' +
+                                 '感想: %{customdata[1]}<extra></extra>',
+                    customdata=df[['user', 'text']].values
+                ))
+                
+                # スマホ対応レイアウト（エラー対策）
+                fig.update_layout(
+                    title='参加者の満足度スコア推移（AI分析）',
+                    height=400,
+                    yaxis_title="満足度スコア",
+                    xaxis_title="投稿順",
+                    showlegend=False,
+                    dragmode='pan',
+                    margin=dict(l=50, r=20, t=50, b=50)
+                )
+                
+                # Y軸の範囲を固定（0-100）
+                fig.update_yaxes(range=[0, 100])
+                
+                st.plotly_chart(fig, use_container_width=True, config={
+                    'displayModeBar': False,  # ツールバーを非表示にしてエラー回避
+                    'displaylogo': False
+                })
+                
+            except Exception as plot_error:
+                st.error(f"グラフ表示エラー: {plot_error}")
+                # 代替として簡単な統計を表示
+                st.markdown("### 📊 満足度データ")
+                st.line_chart(df.set_index('感想順')['sentiment'])
             
-            # 満足度ラインの追加
-            fig.add_hline(y=50, line_dash="dash", line_color="gray", 
-                         annotation_text="普通(50点)", annotation_position="bottom right")
-            fig.add_hline(y=60, line_dash="dot", line_color="green", 
-                         annotation_text="満足ライン(60点)", annotation_position="top right")
-            
-            # メインデータの追加
-            fig.add_trace(go.Scatter(
-                x=df['感想順'],
-                y=df['sentiment'],
-                mode='lines+markers',
-                name='満足度スコア',
-                line=dict(color='#1f77b4', width=3),
-                marker=dict(size=8, color='#1f77b4'),
-                hovertemplate='<b>%{customdata[0]}</b><br>' +
-                             '満足度: %{y}点<br>' +
-                             '感想: %{customdata[1]}<extra></extra>',
-                customdata=df[['user', 'text']].values
-            ))
-            
-            # スマホ対応レイアウト
-            fig.update_layout(
-                title='参加者の満足度スコア推移（AI分析）',
-                height=400,
-                yaxis_title="満足度スコア",
-                xaxis_title="投稿順",
-                showlegend=False,
-                # スマホでの操作を改善
-                dragmode='pan',  # デフォルトをパンモードに
-                scrollZoom=True,  # スクロールズーム有効
-                doubleClick='reset',  # ダブルクリックでリセット
-                # ツールバーを簡略化
-                modebar=dict(
-                    remove=['select2d', 'lasso2d', 'autoScale2d', 'resetScale2d'],
-                    orientation='v'
-                ),
-                # スマホ用マージン調整
-                margin=dict(l=50, r=20, t=50, b=50)
-            )
-            
-            # Y軸の範囲を固定（0-100）
-            fig.update_yaxes(range=[0, 100])
-            
-            st.plotly_chart(fig, use_container_width=True, config={
-                'displayModeBar': True,
-                'displaylogo': False,
-                'modeBarButtonsToRemove': ['select2d', 'lasso2d'],
-                'toImageButtonOptions': {'format': 'png', 'filename': 'satisfaction_trend'}
-            })
-            
-            # 感情の分布（簡単操作）
+            # 感情の分布（簡単操作・エラー対策）
             st.markdown("### 🎭 満足度分布")
             emotion_counts = df['emotion'].value_counts()
             
-            fig2 = go.Figure(data=[go.Pie(
-                labels=emotion_counts.index,
-                values=emotion_counts.values,
-                hole=0.3,  # ドーナツ型にして見やすく
-                textinfo='label+percent',
-                textposition='outside'
-            )])
-            
-            fig2.update_layout(
-                title="参加者の満足度分布（AI分析）",
-                height=400,
-                showlegend=True,
-                legend=dict(orientation="h", yanchor="bottom", y=-0.2),
-                margin=dict(l=20, r=20, t=50, b=50)
-            )
-            
-            st.plotly_chart(fig2, use_container_width=True, config={
-                'displayModeBar': False,  # 円グラフは操作不要なのでツールバー非表示
-                'displaylogo': False
-            })
+            try:
+                fig2 = go.Figure(data=[go.Pie(
+                    labels=emotion_counts.index,
+                    values=emotion_counts.values,
+                    hole=0.3,
+                    textinfo='label+percent',
+                    textposition='outside'
+                )])
+                
+                fig2.update_layout(
+                    title="参加者の満足度分布（AI分析）",
+                    height=400,
+                    showlegend=True,
+                    legend=dict(orientation="h", yanchor="bottom", y=-0.2),
+                    margin=dict(l=20, r=20, t=50, b=50)
+                )
+                
+                st.plotly_chart(fig2, use_container_width=True, config={
+                    'displayModeBar': False,
+                    'displaylogo': False
+                })
+                
+            except Exception as pie_error:
+                st.error(f"円グラフ表示エラー: {pie_error}")
+                # 代替として棒グラフを表示
+                st.bar_chart(emotion_counts)
             
             # 簡単な統計情報
             st.markdown("### 📈 かんたん統計")
@@ -1007,7 +1010,7 @@ with right_col:
                 st.info(f"**高満足(80点以上)**: {high_satisfaction}人")
     
     else:
-        st.info("まだ感想がありません。左側から感想を投稿してみてください！")
+        st.info("まだ感想がありません。下の投稿エリアから感想を投稿してみてください！")
         
         st.markdown("""
         ### 🎓 オープンキャンパスへようこそ！
@@ -1023,6 +1026,10 @@ with right_col:
         
         どんな小さなことでも大歓迎です！
         AIがあなたの感情を詳しく分析してくれます。
+        
+        **📱 スマホの方へ**
+        - 下にスクロールすると投稿エリアがあります
+        - 感想を入力してAI分析を体験してみてください！
         """)
 
 # 自動更新処理（非ブロッキング）
