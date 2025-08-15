@@ -41,8 +41,6 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 </script>
 """, unsafe_allow_html=True)
-
-# メインアプリ
 st.title("🎓 オープンキャンパス感想SNS")
 st.markdown("**今日のオープンキャンパスはいかがでしたか？AI（Gemini 2.5）が高精度に感想を分析します！**")
 
