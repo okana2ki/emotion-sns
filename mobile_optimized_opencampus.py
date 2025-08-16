@@ -446,10 +446,13 @@ def load_posts():
         return st.session_state.get('posts', [])
     
     try:
-        response = requests.get(GAS_URL, timeout=3)
+        response = requests.get(GAS_URL, timeout=10)  # タイムアウトを延長
         if response.status_code == 200:
             posts = response.json()
             for post in posts:
+                # 時刻データの処理（変数定義の修正）
+                time_value = post.get('time')  # 変数定義をここに移動
+                
                 if time_value:
                     try:
                         if isinstance(time_value, str):
@@ -473,7 +476,11 @@ def load_posts():
                                     post['time'] = datetime.strptime(time_str, '%Y/%m/%d %H:%M:%S')
                                 except ValueError:
                                     # 別の形式を試行
-                                    post['time'] = datetime.strptime(time_str, '%m/%d/%Y %H:%M:%S')
+                                    try:
+                                        post['time'] = datetime.strptime(time_str, '%m/%d/%Y %H:%M:%S')
+                                    except ValueError:
+                                        # 最終フォールバック
+                                        post['time'] = datetime.now()
                             else:
                                 # その他の形式
                                 post['time'] = datetime.fromisoformat(time_str)
@@ -486,7 +493,8 @@ def load_posts():
                             # 既にdatetimeオブジェクトの場合はそのまま保持
                             if DEBUG_MODE:
                                 st.write(f"🔍 datetime保持: {time_value}")
-                            pass
+                            # passではなく明示的に代入
+                            post['time'] = time_value
                         else:
                             # その他の型の場合は現在時刻（新規投稿として扱う）
                             if DEBUG_MODE:
@@ -513,6 +521,13 @@ def load_posts():
             # セッション状態にもバックアップ保存
             st.session_state.posts_backup = posts
             return posts
+        else:
+            if DEBUG_MODE:
+                st.warning(f"HTTP エラー: {response.status_code}")
+            return st.session_state.get('posts_backup', [])
+    except requests.exceptions.Timeout:
+        if DEBUG_MODE:
+            st.warning("⏰ タイムアウト: サーバーの応答が遅いです")
         return st.session_state.get('posts_backup', [])
     except Exception as load_error:
         if DEBUG_MODE:
