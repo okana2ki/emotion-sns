@@ -470,7 +470,20 @@ def load_posts():
         return st.session_state.get('posts', [])
 
 def save_post(nickname, text, score, emotion, reason, keywords, color):
-    """投稿を保存（非同期対応）"""
+    """投稿を保存（重複防止・エラーハンドリング強化）"""
+    # 重複チェック用のハッシュ生成
+    import hashlib
+    post_hash = hashlib.md5(f"{nickname}{text}{score}".encode()).hexdigest()
+    
+    # セッション状態に投稿履歴を保存
+    if 'post_hashes' not in st.session_state:
+        st.session_state.post_hashes = set()
+    
+    # 重複チェック
+    if post_hash in st.session_state.post_hashes:
+        st.warning("⚠️ 同じ内容の投稿が既に存在します")
+        return False
+    
     post_data = {
         'user': nickname,
         'text': text,
@@ -479,23 +492,40 @@ def save_post(nickname, text, score, emotion, reason, keywords, color):
         'reason': reason,
         'keywords': keywords,
         'time': datetime.now().isoformat(),
-        'color': color
+        'color': color,
+        'hash': post_hash
     }
     
     if GAS_URL:
-        try:
-            response = requests.post(GAS_URL, json=post_data, timeout=5)
-            success = response.status_code == 200
-            if success:
-                load_posts.clear()
-            return success
-        except:
-            return False
+        # リトライ機能付きで投稿
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(GAS_URL, json=post_data, timeout=10)
+                if response.status_code == 200:
+                    # 成功時にハッシュを記録
+                    st.session_state.post_hashes.add(post_hash)
+                    load_posts.clear()
+                    return True
+                elif attempt < max_retries - 1:
+                    st.warning(f"⏳ 投稿試行中... ({attempt + 1}/{max_retries})")
+                    time.sleep(1)  # 1秒待機してリトライ
+                
+            except requests.exceptions.RequestException as e:
+                if attempt < max_retries - 1:
+                    st.warning(f"⏳ 接続中... ({attempt + 1}/{max_retries})")
+                    time.sleep(1)
+                else:
+                    st.error(f"❌ ネットワークエラー: {e}")
+        
+        return False
     else:
+        # ローカル保存
         if 'posts' not in st.session_state:
             st.session_state.posts = []
         post_data['time'] = datetime.now()
         st.session_state.posts.append(post_data)
+        st.session_state.post_hashes.add(post_hash)
         return True
 
 def clear_all_posts():
@@ -555,6 +585,13 @@ with col_status3:
         st.info(f"🔄 最新更新: {int(time_since_update)}秒前")
     else:
         st.info("⏸️ 更新停止中")
+    
+    # スマホ向け手動更新ボタン（メイン画面に配置）
+    if st.button("🔄", help="最新の感想を今すぐ確認", key="main_refresh"):
+        load_posts.clear()
+        st.session_state.last_update = datetime.now()
+        st.success("✅ 更新しました！")
+        st.rerun()
 
 # レート制限情報の表示
 if client:
@@ -641,13 +678,14 @@ with left_col:
         "オープンキャンパスの感想をお聞かせください（必須）",
         placeholder="例：模擬授業がとても分かりやすくて、この大学で学びたいと思いました！学生スタッフの皆さんも親切で、キャンパスの雰囲気が素敵でした。",
         height=120,
-        help="📱 タップして感想を入力してください。施設、授業、学生、進路など、どんなことでもOKです！",
+        help="📱 スマホの方：入力後は画面の他の場所をタップしてください。施設、授業、学生、進路など、どんなことでもOKです！",
         disabled=st.session_state.is_posting,
         key="message_input"
     )
     
-    # 入力チェック
+    # 入力チェック（厳密な文字数チェック）
     input_valid = nickname and message and len(message.strip()) > 5
+    char_count = len(message.strip()) if message else 0
     
     # 感情分析ボタン（明示的な分析開始）
     col_analyze, col_reset = st.columns([3, 1])
@@ -666,14 +704,16 @@ with left_col:
             st.session_state.analysis_done = False
             st.rerun()
     
-    # 入力不備の案内
+    # 入力不備の案内（詳細な文字数表示）
     if not input_valid:
         if not nickname:
             st.warning("📝 ニックネームを入力してください")
         elif not message:
             st.warning("📝 感想を入力してください")
-        elif len(message.strip()) <= 5:
-            st.warning("📝 感想をもう少し詳しく書いてください（5文字以上）")
+        elif char_count <= 5:
+            st.warning(f"📝 感想をもう少し詳しく書いてください（現在{char_count}文字、6文字以上必要）")
+    else:
+        st.success(f"✅ 入力完了（{char_count}文字）- AI分析の準備ができました！")
     
     # 感情分析実行
     if analyze_button and input_valid:
@@ -764,30 +804,50 @@ with left_col:
         </div>
         """, unsafe_allow_html=True)
         
-        # 投稿ボタン（分析後のみ表示）
+        # 投稿ボタン（分析後のみ表示・重複防止強化）
         if st.button("🚀 感想を投稿する！", type="primary", use_container_width=True, disabled=st.session_state.is_posting):
             st.session_state.is_posting = True
             
-            with st.spinner("📤 投稿中... しばらくお待ちください"):
+            # 投稿処理の詳細表示
+            with st.spinner("📤 投稿処理中... しばらくお待ちください"):
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                status_text.text("🔗 サーバーに接続中...")
+                progress_bar.progress(25)
+                time.sleep(0.5)
+                
+                status_text.text("📤 データを送信中...")
+                progress_bar.progress(50)
+                
                 success = save_post(nickname, message, score, emotion, reason, keywords, color)
-            
-            if success:
-                # 投稿成功後、フォームをクリア
-                st.session_state.analysis_result = None
-                st.session_state.analysis_done = False
-                st.session_state.show_success = True
-                st.session_state.is_posting = False
+                progress_bar.progress(75)
                 
-                # セッション状態をクリアして入力欄をリセット
-                if "nickname_input" in st.session_state:
-                    del st.session_state["nickname_input"]
-                if "message_input" in st.session_state:
-                    del st.session_state["message_input"]
-                
-                st.rerun()
-            else:
-                st.error("❌ 投稿に失敗しました。もう一度お試しください。")
-                st.session_state.is_posting = False
+                if success:
+                    status_text.text("✅ 投稿完了！")
+                    progress_bar.progress(100)
+                    time.sleep(1)
+                    
+                    # 投稿成功後、フォームをクリア
+                    st.session_state.analysis_result = None
+                    st.session_state.analysis_done = False
+                    st.session_state.show_success = True
+                    st.session_state.is_posting = False
+                    
+                    # セッション状態をクリアして入力欄をリセット
+                    if "nickname_input" in st.session_state:
+                        del st.session_state["nickname_input"]
+                    if "message_input" in st.session_state:
+                        del st.session_state["message_input"]
+                    
+                    progress_bar.empty()
+                    status_text.empty()
+                    st.rerun()
+                else:
+                    progress_bar.empty()
+                    status_text.empty()
+                    st.error("❌ 投稿に失敗しました。ネットワーク接続を確認して、もう一度お試しください。")
+                    st.session_state.is_posting = False
     
     # 使い方ガイド
     st.markdown("---")
@@ -807,7 +867,16 @@ with left_col:
 
 # 右側：投稿一覧
 with right_col:
-    st.subheader("🌟 みんなの感想")
+    # ヘッダーに手動更新ボタンを配置
+    col_title, col_refresh = st.columns([3, 1])
+    with col_title:
+        st.subheader("🌟 みんなの感想")
+    with col_refresh:
+        if st.button("🔄 更新", help="最新の感想を取得", key="posts_refresh"):
+            load_posts.clear()
+            st.session_state.last_update = datetime.now()
+            st.success("✅ 更新完了")
+            st.rerun()
     
     if posts:
         # 統計
@@ -1010,7 +1079,28 @@ with right_col:
                 st.info(f"**高満足(80点以上)**: {high_satisfaction}人")
     
     else:
-        st.info("まだ感想がありません。下の投稿エリアから感想を投稿してみてください！")
+        # デバイス判定に基づく案内
+        st.info("💬 まだ感想がありません。最初の投稿をお待ちしています！")
+        
+        # デバイス別案内（レスポンシブ対応）
+        st.markdown("""
+        <div style="background-color: #e3f2fd; padding: 15px; border-radius: 10px; margin: 10px 0;">
+            <h4>📱 投稿方法</h4>
+            <div class="pc-only" style="display: block;">
+                <strong>パソコンの方：</strong> 左側の「📝 感想を投稿しよう！」エリアから投稿できます
+            </div>
+            <div class="mobile-only" style="display: none;">
+                <strong>スマホの方：</strong> 上にスクロールすると「📝 感想を投稿しよう！」エリアがあります
+            </div>
+        </div>
+        
+        <style>
+        @media (max-width: 768px) {
+            .pc-only { display: none !important; }
+            .mobile-only { display: block !important; }
+        }
+        </style>
+        """, unsafe_allow_html=True)
         
         st.markdown("""
         ### 🎓 オープンキャンパスへようこそ！
@@ -1026,10 +1116,6 @@ with right_col:
         
         どんな小さなことでも大歓迎です！
         AIがあなたの感情を詳しく分析してくれます。
-        
-        **📱 スマホの方へ**
-        - 下にスクロールすると投稿エリアがあります
-        - 感想を入力してAI分析を体験してみてください！
         """)
 
 # 自動更新処理（非ブロッキング）
