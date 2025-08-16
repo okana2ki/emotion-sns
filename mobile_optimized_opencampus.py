@@ -924,11 +924,13 @@ with right_col:
                     post['time'] = datetime.now()
         
         # 新しい順にソート（降順）- デバッグ情報付き
-        # まずソート前の確認
-        if DEBUG_MODE and posts:
-            st.write("ソート前の投稿時刻:")
+        # まずソート前の確認（常に表示）
+        if posts:
+            st.info("🔍 ソート前の投稿順序:")
             for i, p in enumerate(posts[:3]):
-                st.write(f"{i}: {p.get('user', 'unknown')} - {p.get('time', 'no time')}")
+                user_name = p.get('user', 'unknown')
+                post_time = p.get('time', 'no time')
+                st.write(f"{i+1}. {user_name} - {post_time}")
         
         # 時刻でソート（確実に降順）
         try:
@@ -940,13 +942,14 @@ with right_col:
         except Exception as sort_error:
             # ソートエラー時はそのまま使用
             recent_posts = posts[:10]
-            if DEBUG_MODE:
-                st.error(f"ソートエラー: {sort_error}")
+            st.error(f"ソートエラー: {sort_error}")
         
-        if DEBUG_MODE and recent_posts:
-            st.write("ソート後の投稿時刻:")
+        if recent_posts:
+            st.info("🔍 ソート後の投稿順序:")
             for i, p in enumerate(recent_posts[:3]):
-                st.write(f"{i}: {p.get('user', 'unknown')} - {p.get('time', 'no time')}")
+                user_name = p.get('user', 'unknown')
+                post_time = p.get('time', 'no time')
+                st.write(f"{i+1}. {user_name} - {post_time}")
         
         # 現在時刻を一度だけ取得
         current_time = datetime.now()
@@ -995,25 +998,37 @@ with right_col:
             if post.get('reason'):
                 reason_text = post['reason']
                 
-                # デバッグ情報（管理者のみ）
-                if DEBUG_MODE:
-                    st.write(f"Debug - reason: '{reason_text}'")
+                # デバッグ情報（常に表示）
+                st.info(f"🔍 投稿者: {post.get('user', 'unknown')}")
+                st.info(f"🔍 reason内容: '{reason_text}'")
                 
                 # より精密なパターンマッチング
                 if "2.5-flash-lite" in reason_text or "Gemini 2.5" in reason_text:
-                    analysis_info += f"<div class='post-analysis'>🤖 Gemini 2.5で分析</div>"
+                    model_display = "🤖 Gemini 2.5で分析"
+                    analysis_info += f"<div class='post-analysis'>{model_display}</div>"
+                    st.success(f"✅ マッチ: {model_display}")
                 elif "2.0-flash-lite" in reason_text or "Gemini 2.0" in reason_text:
-                    analysis_info += f"<div class='post-analysis'>🤖 Gemini 2.0で分析</div>"
+                    model_display = "🤖 Gemini 2.0で分析"
+                    analysis_info += f"<div class='post-analysis'>{model_display}</div>"
+                    st.success(f"✅ マッチ: {model_display}")
                 elif "gemini" in reason_text.lower() and ("フォールバック" not in reason_text and "キーワードベース" not in reason_text):
-                    analysis_info += f"<div class='post-analysis'>🤖 Gemini AIで分析</div>"
+                    model_display = "🤖 Gemini AIで分析"
+                    analysis_info += f"<div class='post-analysis'>{model_display}</div>"
+                    st.success(f"✅ マッチ: {model_display}")
                 elif "フォールバック" in reason_text or "キーワードベース" in reason_text:
-                    analysis_info += f"<div class='post-analysis'>⚙️ 基本分析で処理</div>"
+                    model_display = "⚙️ 基本分析で処理"
+                    analysis_info += f"<div class='post-analysis'>{model_display}</div>"
+                    st.warning(f"⚠️ マッチ: {model_display}")
                 else:
                     # reasonがあるがパターンにマッチしない場合
-                    analysis_info += f"<div class='post-analysis'>🤖 AI分析（{reason_text[:20]}...）</div>"
+                    model_display = f"🤖 AI分析（{reason_text[:20]}...）"
+                    analysis_info += f"<div class='post-analysis'>{model_display}</div>"
+                    st.error(f"❌ マッチしない: {model_display}")
             else:
                 # reasonが存在しない場合
-                analysis_info += f"<div class='post-analysis'>🤖 AI分析（詳細不明）</div>"
+                model_display = "🤖 AI分析（詳細不明）"
+                analysis_info += f"<div class='post-analysis'>{model_display}</div>"
+                st.warning(f"⚠️ reason無し: {model_display}")
             
             # スマホ対応投稿表示（HTMLの改善）
             st.markdown(f"""
