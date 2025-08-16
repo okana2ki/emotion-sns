@@ -12,7 +12,7 @@ import traceback
 import os
 
 # ページ設定
-st.set_page_config(page_title="オープンキャンパス感想SNS", page_icon="🎓", layout="wide")
+st.set_page_config(page_title="感情分析SNS", page_icon="🎓", layout="wide")
 
 # カスタムCSS（スマホ対応・日本語表示）
 st.markdown("""
@@ -552,53 +552,27 @@ def clear_all_posts():
         return True
 
 # メインアプリ
-st.title("🎓 オープンキャンパス感想SNS")
+st.title("🎓 感情分析SNS")
 st.markdown("**今日のオープンキャンパスはいかがでしたか？AI（Gemini 2.5）が高精度に感想を分析します！**")
 
 # Gemini設定とデバッグ情報
 client, setup_status, current_model = setup_gemini()
 
 # 接続状況とリアルタイム更新状態
-col_status1, col_status2, col_status3 = st.columns(3)
+col_status1, col_status2 = st.columns(2)
 with col_status1:
     if GAS_URL:
         st.success("🌐 全参加者で共有中")
     else:
-        st.warning("💻 ローカルモード")
+        st.warning("💻 この端末のみ（テストモード）")
 
 with col_status2:
-    if client:
-        # 正確なモデル表示
-        if current_model == "gemini-2.5-flash-lite":
-            st.success("🤖 AI分析：Gemini 2.5")
-        elif current_model == "gemini-2.0-flash-lite":
-            st.success("🤖 AI分析：Gemini 2.0")
-        else:
-            st.success("🤖 AI分析：稼働中")
-    else:
-        st.error("⚠️ 基本分析モード")
-
-with col_status3:
-    now = datetime.now()
-    time_since_update = (now - st.session_state.last_update).total_seconds()
-    if st.session_state.auto_update_enabled and time_since_update < 30:
-        st.info(f"🔄 最新更新: {int(time_since_update)}秒前")
-    else:
-        st.info("⏸️ 更新停止中")
-    
     # スマホ向け手動更新ボタン（メイン画面に配置）
-    if st.button("🔄", help="最新の感想を今すぐ確認", key="main_refresh"):
+    if st.button("🔄 最新の感想を更新", help="最新の感想を今すぐ確認", key="main_refresh"):
         load_posts.clear()
         st.session_state.last_update = datetime.now()
         st.success("✅ 更新しました！")
         st.rerun()
-
-# レート制限情報の表示
-if client:
-    if current_model == "gemini-2.5-flash-lite":
-        st.info("📊 **Gemini 2.5 Flash-Lite**: 15RPM, 250,000TPM - オープンキャンパス最適化")
-    elif current_model == "gemini-2.0-flash-lite":
-        st.warning("📊 **Gemini 2.0 Flash-Lite**: 30RPM, 1,000,000TPM - フォールバックモード")
 
 # 成功メッセージの表示（投稿後）
 if st.session_state.show_success:
@@ -688,7 +662,7 @@ with left_col:
     char_count = len(message.strip()) if message else 0
     
     # 感情分析ボタン（明示的な分析開始）
-    col_analyze, col_reset = st.columns([3, 1])
+    col_analyze, col_reanalyze = st.columns([3, 1])
     
     with col_analyze:
         analyze_button = st.button(
@@ -698,11 +672,20 @@ with left_col:
             disabled=not input_valid or st.session_state.is_posting
         )
     
-    with col_reset:
-        if st.button("🔄", help="分析結果をリセット", disabled=st.session_state.is_posting):
+    with col_reanalyze:
+        if st.button("🔄 再分析", help="もう一度AI分析を実行", disabled=st.session_state.is_posting):
+            # 既存の分析結果をクリアして再分析
             st.session_state.analysis_result = None
             st.session_state.analysis_done = False
-            st.rerun()
+            if input_valid:
+                # 再分析処理を即座に実行
+                with st.spinner("🤖 再分析中..."):
+                    analysis_result = analyze_sentiment_with_llm(message, client, current_model)
+                    st.session_state.analysis_result = analysis_result
+                    st.session_state.analysis_done = True
+                st.rerun()
+            else:
+                st.warning("📝 ニックネームと感想（6文字以上）を入力してください")
     
     # 入力不備の案内（詳細な文字数表示）
     if not input_valid:
@@ -767,16 +750,16 @@ with left_col:
         with col_score:
             st.metric("満足度スコア", f"{score}点", emotion)
         with col_model:
-            # 正確なモデル表示の修正
+            # 使用モデルを表示（高校生にも分かりやすく）
             if client and "フォールバック" not in reason:
                 if current_model == "gemini-2.5-flash-lite":
-                    st.success("Gemini 2.5")
+                    st.success("🤖 Gemini 2.5")
                 elif current_model == "gemini-2.0-flash-lite":
-                    st.success("Gemini 2.0")
+                    st.info("🤖 Gemini 2.0")
                 else:
-                    st.success("Gemini AI")
+                    st.success("🤖 AI分析")
             else:
-                st.warning("基本分析")
+                st.warning("⚙️ 基本分析")
         
         if reason:
             # フォールバック使用時は警告色で表示
@@ -862,7 +845,7 @@ with left_col:
     
     **💡 コツ**
     - 感想は具体的に書くほど分析精度が向上します
-    - 施設、授業、学生、進路について書いてみてください
+    - 模擬授業、学科説明、データサイエンス体験コーナー、学生スタッフ、施設などについて書いてみてください
     """)
 
 # 右側：投稿一覧
@@ -894,8 +877,8 @@ with right_col:
             satisfaction_rate = (satisfied_count / total_posts) * 100
             st.metric("満足率", f"{satisfaction_rate:.0f}%")
         
-        # 投稿一覧（最新10件）- スマホ対応改善
-        st.markdown("### 💬 最新の感想")
+        # 投稿一覧（最新10件）- 新しいものを上に表示
+        st.markdown("### 💬 最新の感想（新しい順）")
         
         # 時刻でソート
         for post in posts:
@@ -912,6 +895,7 @@ with right_col:
                 except:
                     post['time'] = datetime.now()
         
+        # 新しい順にソート（降順）
         recent_posts = sorted(posts, key=lambda x: x.get('time', datetime.min), reverse=True)[:10]
         
         for i, post in enumerate(recent_posts):
@@ -940,13 +924,22 @@ with right_col:
             else:
                 time_str = post_time.strftime('%H:%M')
             
-            # 分析理由やキーワードの表示
+            # 分析理由やキーワード、使用モデルの表示
             analysis_info = ""
             if post.get('reason'):
                 analysis_info += f"<div class='post-analysis'>💭 {post['reason']}</div>"
             if post.get('keywords') and len(post['keywords']) > 0:
                 keywords_str = ', '.join(post['keywords'][:3])
                 analysis_info += f"<div class='post-analysis'>🔍 {keywords_str}</div>"
+            
+            # 使用AIモデルの表示（高校生向け）
+            if post.get('reason'):
+                if "Gemini gemini-2.5-flash-lite" in post['reason']:
+                    analysis_info += f"<div class='post-analysis'>🤖 Gemini 2.5で分析</div>"
+                elif "Gemini gemini-2.0-flash-lite" in post['reason']:
+                    analysis_info += f"<div class='post-analysis'>🤖 Gemini 2.0で分析</div>"
+                elif "フォールバック" in post['reason']:
+                    analysis_info += f"<div class='post-analysis'>⚙️ 基本分析で処理</div>"
             
             # スマホ対応投稿表示（HTMLの改善）
             st.markdown(f"""
@@ -1132,7 +1125,7 @@ if st.session_state.auto_update_enabled:
 st.markdown("---")
 st.markdown("""
 <div style="text-align: center; color: #666; padding: 20px;">
-    🎓 オープンキャンパス感想SNS | AI感情分析 powered by Gemini 2.5<br>
+    🎓 感情分析SNS | AI感情分析 powered by Gemini 2.5<br>
     <small>💡 200名規模対応・レート制限最適化済み</small><br>
     <small>📱 スマホ完全対応・高校生向けUI</small><br>
     <small>画面が固まる場合は、サイドバーで「自動更新」をオフにしてください</small><br>
