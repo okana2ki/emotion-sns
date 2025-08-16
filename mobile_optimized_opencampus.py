@@ -143,8 +143,8 @@ if 'analysis_result' not in st.session_state:
 if 'analysis_done' not in st.session_state:
     st.session_state.analysis_done = False
 
-# デバッグモード切り替え
-DEBUG_MODE = st.secrets.get("debug_mode", False)
+# デバッグモード切り替え（問題調査用に一時的に有効化）
+DEBUG_MODE = st.secrets.get("debug_mode", True)  # 一時的にTrueに設定
 
 # Gemini API設定（新SDK対応）
 @st.cache_resource
@@ -923,8 +923,30 @@ with right_col:
                 except:
                     post['time'] = datetime.now()
         
-        # 新しい順にソート（降順）- タイムスタンプベースの正確なソート
-        recent_posts = sorted(posts, key=lambda x: x.get('time', datetime.min), reverse=True)[:10]
+        # 新しい順にソート（降順）- デバッグ情報付き
+        # まずソート前の確認
+        if DEBUG_MODE and posts:
+            st.write("ソート前の投稿時刻:")
+            for i, p in enumerate(posts[:3]):
+                st.write(f"{i}: {p.get('user', 'unknown')} - {p.get('time', 'no time')}")
+        
+        # 時刻でソート（確実に降順）
+        try:
+            recent_posts = sorted(
+                posts, 
+                key=lambda x: x.get('time', datetime.min) if isinstance(x.get('time'), datetime) else datetime.min, 
+                reverse=True
+            )[:10]
+        except Exception as sort_error:
+            # ソートエラー時はそのまま使用
+            recent_posts = posts[:10]
+            if DEBUG_MODE:
+                st.error(f"ソートエラー: {sort_error}")
+        
+        if DEBUG_MODE and recent_posts:
+            st.write("ソート後の投稿時刻:")
+            for i, p in enumerate(recent_posts[:3]):
+                st.write(f"{i}: {p.get('user', 'unknown')} - {p.get('time', 'no time')}")
         
         # 現在時刻を一度だけ取得
         current_time = datetime.now()
@@ -969,19 +991,29 @@ with right_col:
                 keywords_str = ', '.join(post['keywords'][:3])
                 analysis_info += f"<div class='post-analysis'>🔍 {keywords_str}</div>"
             
-            # 使用AIモデルの表示（高校生向け・正確な判定）
+            # 使用AIモデルの表示（詳細なデバッグ付き）
             if post.get('reason'):
                 reason_text = post['reason']
-                if "gemini-2.5-flash-lite" in reason_text.lower():
+                
+                # デバッグ情報（管理者のみ）
+                if DEBUG_MODE:
+                    st.write(f"Debug - reason: '{reason_text}'")
+                
+                # より精密なパターンマッチング
+                if "2.5-flash-lite" in reason_text or "Gemini 2.5" in reason_text:
                     analysis_info += f"<div class='post-analysis'>🤖 Gemini 2.5で分析</div>"
-                elif "gemini-2.0-flash-lite" in reason_text.lower():
+                elif "2.0-flash-lite" in reason_text or "Gemini 2.0" in reason_text:
                     analysis_info += f"<div class='post-analysis'>🤖 Gemini 2.0で分析</div>"
-                elif "gemini" in reason_text.lower() and "フォールバック" not in reason_text:
+                elif "gemini" in reason_text.lower() and ("フォールバック" not in reason_text and "キーワードベース" not in reason_text):
                     analysis_info += f"<div class='post-analysis'>🤖 Gemini AIで分析</div>"
                 elif "フォールバック" in reason_text or "キーワードベース" in reason_text:
                     analysis_info += f"<div class='post-analysis'>⚙️ 基本分析で処理</div>"
                 else:
-                    analysis_info += f"<div class='post-analysis'>🤖 AI分析</div>"
+                    # reasonがあるがパターンにマッチしない場合
+                    analysis_info += f"<div class='post-analysis'>🤖 AI分析（{reason_text[:20]}...）</div>"
+            else:
+                # reasonが存在しない場合
+                analysis_info += f"<div class='post-analysis'>🤖 AI分析（詳細不明）</div>"
             
             # スマホ対応投稿表示（HTMLの改善）
             st.markdown(f"""
