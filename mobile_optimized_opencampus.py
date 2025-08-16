@@ -143,8 +143,8 @@ if 'analysis_result' not in st.session_state:
 if 'analysis_done' not in st.session_state:
     st.session_state.analysis_done = False
 
-# デバッグモード切り替え（問題調査用に一時的に有効化）
-DEBUG_MODE = st.secrets.get("debug_mode", True)  # 一時的にTrueに設定
+# デバッグモード切り替え（時刻問題調査のため一時的に有効化）
+DEBUG_MODE = st.secrets.get("debug_mode", True)  # 元に戻す
 
 # Gemini API設定（新SDK対応）
 @st.cache_resource
@@ -441,7 +441,7 @@ GAS_URL = st.secrets.get("gas_url", "")
 
 @st.cache_data(ttl=10, show_spinner=False)
 def load_posts():
-    """投稿を読み込み（キャッシュ付き）"""
+    """投稿を読み込み（キャッシュ付き）- 時刻保持修正版"""
     if not GAS_URL:
         return st.session_state.get('posts', [])
     
@@ -450,32 +450,53 @@ def load_posts():
         if response.status_code == 200:
             posts = response.json()
             for post in posts:
-                if post.get('time'):
+                # 時刻データの処理を完全に見直し
+                time_value = post.get('time')
+                
+                if time_value:
                     try:
-                        if isinstance(post['time'], str):
-                            time_str = post['time'].replace('Z', '')
+                        if isinstance(time_value, str):
+                            # 文字列の場合のみ変換を試行
+                            time_str = time_value.replace('Z', '')
                             if '.' in time_str:
-                                # 元の投稿時刻を保持
                                 post['time'] = datetime.fromisoformat(time_str.split('.')[0])
                             else:
                                 post['time'] = datetime.fromisoformat(time_str)
-                        # datetimeオブジェクトの場合はそのまま保持
-                        elif isinstance(post['time'], datetime):
-                            pass  # 変更せずそのまま使用
+                        elif isinstance(time_value, datetime):
+                            # 既にdatetimeオブジェクトの場合はそのまま保持
+                            pass
+                        else:
+                            # その他の型の場合は現在時刻（新規投稿として扱う）
+                            post['time'] = datetime.now()
                     except Exception as time_error:
-                        st.warning(f"時刻変換エラー: {time_error} - {post.get('time')}")
-                        # エラー時のみ現在時刻を設定
-                        post['time'] = datetime.now()
+                        # 変換エラー時のデバッグ情報
+                        if DEBUG_MODE:
+                            st.error(f"時刻変換エラー: {time_error} - 元データ: {time_value}")
+                        # エラー時は元の値をそのまま保持（変換しない）
+                        if isinstance(time_value, str):
+                            try:
+                                # 最低限の変換を試行
+                                post['time'] = datetime.fromisoformat(time_value.replace('Z', '').split('.')[0])
+                            except:
+                                # 最終的に失敗した場合のみ現在時刻
+                                post['time'] = datetime.now()
                 else:
                     # timeフィールドが存在しない場合のみ現在時刻
                     post['time'] = datetime.now()
+            
+            # デバッグ: 読み込み後の時刻確認
+            if DEBUG_MODE and posts:
+                st.info("🔍 読み込み後の時刻データ:")
+                for i, p in enumerate(posts[:3]):
+                    st.write(f"{i+1}. {p.get('user', 'unknown')} - {p.get('time', 'no time')}")
             
             # セッション状態にもバックアップ保存
             st.session_state.posts_backup = posts
             return posts
         return st.session_state.get('posts_backup', [])
     except Exception as load_error:
-        st.error(f"データ読み込みエラー: {load_error}")
+        if DEBUG_MODE:
+            st.error(f"データ読み込みエラー: {load_error}")
         return st.session_state.get('posts_backup', [])
 
 def save_post(nickname, text, score, emotion, reason, keywords, color):
@@ -938,16 +959,7 @@ with right_col:
                 except:
                     post['time'] = datetime.now()
         
-        # 新しい順にソート（降順）- デバッグ情報付き
-        # まずソート前の確認（常に表示）
-        if posts:
-            st.info("🔍 ソート前の投稿順序:")
-            for i, p in enumerate(posts[:3]):
-                user_name = p.get('user', 'unknown')
-                post_time = p.get('time', 'no time')
-                st.write(f"{i+1}. {user_name} - {post_time}")
-        
-        # 時刻でソート（確実に降順）
+        # 新しい順にソート（降順）- 正確なソート
         try:
             recent_posts = sorted(
                 posts, 
@@ -957,14 +969,6 @@ with right_col:
         except Exception as sort_error:
             # ソートエラー時はそのまま使用
             recent_posts = posts[:10]
-            st.error(f"ソートエラー: {sort_error}")
-        
-        if recent_posts:
-            st.info("🔍 ソート後の投稿順序:")
-            for i, p in enumerate(recent_posts[:3]):
-                user_name = p.get('user', 'unknown')
-                post_time = p.get('time', 'no time')
-                st.write(f"{i+1}. {user_name} - {post_time}")
         
         # 現在時刻を一度だけ取得
         current_time = datetime.now()
@@ -1023,26 +1027,20 @@ with right_col:
                     analysis_info += f"<div class='post-analysis'>⚙️ 基本分析で処理</div>"
                 else:
                     analysis_info += f"<div class='post-analysis'>🤖 {model_used}で分析</div>"
-                st.success(f"✅ model_used使用: {model_used}")
             elif post.get('reason'):
                 # 古い投稿でmodel_usedがない場合、reasonから推測
                 reason_text = post['reason']
-                st.info(f"🔍 reasonから推測: '{reason_text[:50]}...'")
                 
                 # reasonからの推測（フォールバック）
                 if "gemini" in reason_text.lower() and "フォールバック" not in reason_text:
                     analysis_info += f"<div class='post-analysis'>🤖 Gemini AIで分析</div>"
-                    st.warning("⚠️ reasonから推測: Gemini AI")
                 elif "フォールバック" in reason_text or "キーワードベース" in reason_text:
                     analysis_info += f"<div class='post-analysis'>⚙️ 基本分析で処理</div>"
-                    st.warning("⚠️ reasonから推測: 基本分析")
                 else:
                     analysis_info += f"<div class='post-analysis'>🤖 AI分析</div>"
-                    st.error(f"❌ 推測不可: AI分析")
             else:
                 # reasonもない古い投稿
                 analysis_info += f"<div class='post-analysis'>🤖 AI分析（詳細不明）</div>"
-                st.warning("⚠️ 情報不足: 詳細不明")
             
             # スマホ対応投稿表示（HTMLの改善）
             st.markdown(f"""
