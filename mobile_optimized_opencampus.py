@@ -143,8 +143,8 @@ if 'analysis_result' not in st.session_state:
 if 'analysis_done' not in st.session_state:
     st.session_state.analysis_done = False
 
-# デバッグモード切り替え（問題調査用に一時的に有効化）
-DEBUG_MODE = st.secrets.get("debug_mode", True)  # 一時的にTrueに設定
+# デバッグモード切り替え（問題解決後は無効化）
+DEBUG_MODE = st.secrets.get("debug_mode", False)  # 元に戻す
 
 # Gemini API設定（新SDK対応）
 @st.cache_resource
@@ -439,14 +439,14 @@ def simple_sentiment_analysis_fallback(text):
 # Google Apps Script URL
 GAS_URL = st.secrets.get("gas_url", "")
 
-@st.cache_data(ttl=10, show_spinner=False)  # キャッシュ時間を短縮、スピナー非表示
+@st.cache_data(ttl=10, show_spinner=False)
 def load_posts():
     """投稿を読み込み（キャッシュ付き）"""
     if not GAS_URL:
         return st.session_state.get('posts', [])
     
     try:
-        response = requests.get(GAS_URL, timeout=3)  # タイムアウト短縮
+        response = requests.get(GAS_URL, timeout=3)
         if response.status_code == 200:
             posts = response.json()
             for post in posts:
@@ -455,25 +455,31 @@ def load_posts():
                         if isinstance(post['time'], str):
                             time_str = post['time'].replace('Z', '')
                             if '.' in time_str:
+                                # 元の投稿時刻を保持
                                 post['time'] = datetime.fromisoformat(time_str.split('.')[0])
                             else:
                                 post['time'] = datetime.fromisoformat(time_str)
-                        elif not isinstance(post['time'], datetime):
-                            post['time'] = datetime.now()
-                    except:
+                        # datetimeオブジェクトの場合はそのまま保持
+                        elif isinstance(post['time'], datetime):
+                            pass  # 変更せずそのまま使用
+                    except Exception as time_error:
+                        st.warning(f"時刻変換エラー: {time_error} - {post.get('time')}")
+                        # エラー時のみ現在時刻を設定
                         post['time'] = datetime.now()
                 else:
+                    # timeフィールドが存在しない場合のみ現在時刻
                     post['time'] = datetime.now()
             
             # セッション状態にもバックアップ保存
             st.session_state.posts_backup = posts
             return posts
         return st.session_state.get('posts_backup', [])
-    except:
+    except Exception as load_error:
+        st.error(f"データ読み込みエラー: {load_error}")
         return st.session_state.get('posts_backup', [])
 
 def save_post(nickname, text, score, emotion, reason, keywords, color):
-    """投稿を保存（重複防止・エラーハンドリング強化）"""
+    """投稿を保存（重複防止・エラーハンドリング強化・モデル情報追加）"""
     # 重複チェック用のハッシュ生成
     import hashlib
     post_hash = hashlib.md5(f"{nickname}{text}{score}".encode()).hexdigest()
@@ -487,6 +493,9 @@ def save_post(nickname, text, score, emotion, reason, keywords, color):
         st.warning("⚠️ 同じ内容の投稿が既に存在します")
         return False
     
+    # モデル情報を取得
+    model_info = st.session_state.get('temp_model_info', 'AI分析')
+    
     post_data = {
         'user': nickname,
         'text': text,
@@ -494,6 +503,7 @@ def save_post(nickname, text, score, emotion, reason, keywords, color):
         'emotion': emotion,
         'reason': reason,
         'keywords': keywords,
+        'model_used': model_info,  # モデル情報を明示的に保存
         'time': datetime.now().isoformat(),
         'color': color,
         'hash': post_hash
@@ -773,17 +783,22 @@ with left_col:
         if keywords:
             st.markdown(f"**🔍 キーワード:** {', '.join(keywords)}")
         
-        # プレビュー（スマホ対応修正・AIモデル表示）
+        # AIモデル情報の保存（reasonとは別フィールド）
         ai_model_info = ""
         if client and "フォールバック" not in reason:
             if current_model == "gemini-2.5-flash-lite":
-                ai_model_info = "<div class='post-analysis'>🤖 Gemini 2.5で分析</div>"
+                ai_model_info = "🤖 Gemini 2.5で分析"
+                # 投稿データにモデル情報を追加
+                st.session_state.temp_model_info = "Gemini 2.5"
             elif current_model == "gemini-2.0-flash-lite":
-                ai_model_info = "<div class='post-analysis'>🤖 Gemini 2.0で分析</div>"
+                ai_model_info = "🤖 Gemini 2.0で分析"
+                st.session_state.temp_model_info = "Gemini 2.0"
             else:
-                ai_model_info = "<div class='post-analysis'>🤖 AI分析</div>"
+                ai_model_info = "🤖 Gemini AIで分析"
+                st.session_state.temp_model_info = "Gemini AI"
         else:
-            ai_model_info = "<div class='post-analysis'>⚙️ 基本分析で処理</div>"
+            ai_model_info = "⚙️ 基本分析で処理"
+            st.session_state.temp_model_info = "基本分析"
         
         st.markdown(f"""
         <div class="post-card" style="--border-color: {color};">
@@ -797,7 +812,7 @@ with left_col:
             <div class="post-text">
                 💬 {message}
             </div>
-            {ai_model_info}
+            <div class='post-analysis'>{ai_model_info}</div>
         </div>
         """, unsafe_allow_html=True)
         
@@ -923,16 +938,7 @@ with right_col:
                 except:
                     post['time'] = datetime.now()
         
-        # 新しい順にソート（降順）- デバッグ情報付き
-        # まずソート前の確認（常に表示）
-        if posts:
-            st.info("🔍 ソート前の投稿順序:")
-            for i, p in enumerate(posts[:3]):
-                user_name = p.get('user', 'unknown')
-                post_time = p.get('time', 'no time')
-                st.write(f"{i+1}. {user_name} - {post_time}")
-        
-        # 時刻でソート（確実に降順）
+        # 新しい順にソート（降順）- 正確なソート
         try:
             recent_posts = sorted(
                 posts, 
@@ -942,14 +948,6 @@ with right_col:
         except Exception as sort_error:
             # ソートエラー時はそのまま使用
             recent_posts = posts[:10]
-            st.error(f"ソートエラー: {sort_error}")
-        
-        if recent_posts:
-            st.info("🔍 ソート後の投稿順序:")
-            for i, p in enumerate(recent_posts[:3]):
-                user_name = p.get('user', 'unknown')
-                post_time = p.get('time', 'no time')
-                st.write(f"{i+1}. {user_name} - {post_time}")
         
         # 現在時刻を一度だけ取得
         current_time = datetime.now()
@@ -994,41 +992,34 @@ with right_col:
                 keywords_str = ', '.join(post['keywords'][:3])
                 analysis_info += f"<div class='post-analysis'>🔍 {keywords_str}</div>"
             
-            # 使用AIモデルの表示（詳細なデバッグ付き）
-            if post.get('reason'):
+            # 使用AIモデルの表示（model_usedフィールドを優先使用）
+            if post.get('model_used'):
+                # 新しいmodel_usedフィールドがある場合
+                model_used = post['model_used']
+                if model_used == "Gemini 2.5":
+                    analysis_info += f"<div class='post-analysis'>🤖 Gemini 2.5で分析</div>"
+                elif model_used == "Gemini 2.0":
+                    analysis_info += f"<div class='post-analysis'>🤖 Gemini 2.0で分析</div>"
+                elif model_used == "Gemini AI":
+                    analysis_info += f"<div class='post-analysis'>🤖 Gemini AIで分析</div>"
+                elif model_used == "基本分析":
+                    analysis_info += f"<div class='post-analysis'>⚙️ 基本分析で処理</div>"
+                else:
+                    analysis_info += f"<div class='post-analysis'>🤖 {model_used}で分析</div>"
+            elif post.get('reason'):
+                # 古い投稿でmodel_usedがない場合、reasonから推測
                 reason_text = post['reason']
                 
-                # デバッグ情報（常に表示）
-                st.info(f"🔍 投稿者: {post.get('user', 'unknown')}")
-                st.info(f"🔍 reason内容: '{reason_text}'")
-                
-                # より精密なパターンマッチング
-                if "2.5-flash-lite" in reason_text or "Gemini 2.5" in reason_text:
-                    model_display = "🤖 Gemini 2.5で分析"
-                    analysis_info += f"<div class='post-analysis'>{model_display}</div>"
-                    st.success(f"✅ マッチ: {model_display}")
-                elif "2.0-flash-lite" in reason_text or "Gemini 2.0" in reason_text:
-                    model_display = "🤖 Gemini 2.0で分析"
-                    analysis_info += f"<div class='post-analysis'>{model_display}</div>"
-                    st.success(f"✅ マッチ: {model_display}")
-                elif "gemini" in reason_text.lower() and ("フォールバック" not in reason_text and "キーワードベース" not in reason_text):
-                    model_display = "🤖 Gemini AIで分析"
-                    analysis_info += f"<div class='post-analysis'>{model_display}</div>"
-                    st.success(f"✅ マッチ: {model_display}")
+                # reasonからの推測（フォールバック）
+                if "gemini" in reason_text.lower() and "フォールバック" not in reason_text:
+                    analysis_info += f"<div class='post-analysis'>🤖 Gemini AIで分析</div>"
                 elif "フォールバック" in reason_text or "キーワードベース" in reason_text:
-                    model_display = "⚙️ 基本分析で処理"
-                    analysis_info += f"<div class='post-analysis'>{model_display}</div>"
-                    st.warning(f"⚠️ マッチ: {model_display}")
+                    analysis_info += f"<div class='post-analysis'>⚙️ 基本分析で処理</div>"
                 else:
-                    # reasonがあるがパターンにマッチしない場合
-                    model_display = f"🤖 AI分析（{reason_text[:20]}...）"
-                    analysis_info += f"<div class='post-analysis'>{model_display}</div>"
-                    st.error(f"❌ マッチしない: {model_display}")
+                    analysis_info += f"<div class='post-analysis'>🤖 AI分析</div>"
             else:
-                # reasonが存在しない場合
-                model_display = "🤖 AI分析（詳細不明）"
-                analysis_info += f"<div class='post-analysis'>{model_display}</div>"
-                st.warning(f"⚠️ reason無し: {model_display}")
+                # reasonもない古い投稿
+                analysis_info += f"<div class='post-analysis'>🤖 AI分析（詳細不明）</div>"
             
             # スマホ対応投稿表示（HTMLの改善）
             st.markdown(f"""
