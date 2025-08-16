@@ -661,6 +661,17 @@ with left_col:
     input_valid = nickname and message and len(message.strip()) > 5
     char_count = len(message.strip()) if message else 0
     
+    # 入力状態の即座フィードバック（入力欄直下に配置）
+    if not input_valid:
+        if not nickname:
+            st.warning("📝 ニックネームを入力してください")
+        elif not message:
+            st.warning("📝 感想を入力してください")
+        elif char_count <= 5:
+            st.warning(f"📝 感想をもう少し詳しく書いてください（現在{char_count}文字、6文字以上必要）")
+    else:
+        st.success(f"✅ 入力完了（{char_count}文字）- AI分析の準備ができました！")
+    
     # 感情分析ボタン（明示的な分析開始）
     col_analyze, col_reanalyze = st.columns([3, 1])
     
@@ -673,30 +684,20 @@ with left_col:
         )
     
     with col_reanalyze:
-        if st.button("🔄 再分析", help="もう一度AI分析を実行", disabled=st.session_state.is_posting):
+        # 再分析ボタンは入力が有効で、かつ分析済みの場合のみ有効
+        reanalyze_enabled = input_valid and st.session_state.analysis_done and not st.session_state.is_posting
+        if st.button("🔄 再分析", help="もう一度AI分析を実行", disabled=not reanalyze_enabled):
             # 既存の分析結果をクリアして再分析
             st.session_state.analysis_result = None
             st.session_state.analysis_done = False
-            if input_valid:
-                # 再分析処理を即座に実行
-                with st.spinner("🤖 再分析中..."):
-                    analysis_result = analyze_sentiment_with_llm(message, client, current_model)
-                    st.session_state.analysis_result = analysis_result
-                    st.session_state.analysis_done = True
-                st.rerun()
-            else:
-                st.warning("📝 ニックネームと感想（6文字以上）を入力してください")
+            # 再分析処理を即座に実行
+            with st.spinner("🤖 再分析中..."):
+                analysis_result = analyze_sentiment_with_llm(message, client, current_model)
+                st.session_state.analysis_result = analysis_result
+                st.session_state.analysis_done = True
+            st.rerun()
     
-    # 入力不備の案内（詳細な文字数表示）
-    if not input_valid:
-        if not nickname:
-            st.warning("📝 ニックネームを入力してください")
-        elif not message:
-            st.warning("📝 感想を入力してください")
-        elif char_count <= 5:
-            st.warning(f"📝 感想をもう少し詳しく書いてください（現在{char_count}文字、6文字以上必要）")
-    else:
-        st.success(f"✅ 入力完了（{char_count}文字）- AI分析の準備ができました！")
+    # 入力状態の表示を削除（上に移動済み）
     
     # 感情分析実行
     if analyze_button and input_valid:
@@ -771,7 +772,18 @@ with left_col:
         if keywords:
             st.markdown(f"**🔍 キーワード:** {', '.join(keywords)}")
         
-        # プレビュー（スマホ対応修正）
+        # プレビュー（スマホ対応修正・AIモデル表示）
+        ai_model_info = ""
+        if client and "フォールバック" not in reason:
+            if current_model == "gemini-2.5-flash-lite":
+                ai_model_info = "<div class='post-analysis'>🤖 Gemini 2.5で分析</div>"
+            elif current_model == "gemini-2.0-flash-lite":
+                ai_model_info = "<div class='post-analysis'>🤖 Gemini 2.0で分析</div>"
+            else:
+                ai_model_info = "<div class='post-analysis'>🤖 AI分析</div>"
+        else:
+            ai_model_info = "<div class='post-analysis'>⚙️ 基本分析で処理</div>"
+        
         st.markdown(f"""
         <div class="post-card" style="--border-color: {color};">
             <div class="post-header">
@@ -784,6 +796,7 @@ with left_col:
             <div class="post-text">
                 💬 {message}
             </div>
+            {ai_model_info}
         </div>
         """, unsafe_allow_html=True)
         
@@ -901,6 +914,7 @@ with right_col:
         for i, post in enumerate(recent_posts):
             post_time = post.get('time')
             
+            # 時刻データの正規化
             if isinstance(post_time, str):
                 try:
                     time_str = post_time.replace('Z', '')
@@ -913,18 +927,24 @@ with right_col:
             elif not isinstance(post_time, datetime):
                 post_time = datetime.now()
             
-            # 時間差計算
+            # 時間差計算（正確な計算）
             now = datetime.now()
             diff = now - post_time
             
-            if diff.total_seconds() < 60:
-                time_str = f"{int(diff.total_seconds())}秒前"
-            elif diff.total_seconds() < 3600:
-                time_str = f"{int(diff.total_seconds() / 60)}分前"
+            # より正確な時間表示
+            total_seconds = int(diff.total_seconds())
+            if total_seconds < 60:
+                time_str = f"{total_seconds}秒前"
+            elif total_seconds < 3600:
+                minutes = total_seconds // 60
+                time_str = f"{minutes}分前"
+            elif total_seconds < 86400:
+                hours = total_seconds // 3600
+                time_str = f"{hours}時間前"
             else:
-                time_str = post_time.strftime('%H:%M')
+                time_str = post_time.strftime('%m/%d %H:%M')
             
-            # 分析理由やキーワード、使用モデルの表示
+            # 分析理由やキーワード、使用モデルの表示（改善版）
             analysis_info = ""
             if post.get('reason'):
                 analysis_info += f"<div class='post-analysis'>💭 {post['reason']}</div>"
@@ -932,14 +952,19 @@ with right_col:
                 keywords_str = ', '.join(post['keywords'][:3])
                 analysis_info += f"<div class='post-analysis'>🔍 {keywords_str}</div>"
             
-            # 使用AIモデルの表示（高校生向け）
+            # 使用AIモデルの表示（高校生向け・正確な判定）
             if post.get('reason'):
-                if "Gemini gemini-2.5-flash-lite" in post['reason']:
+                reason_text = post['reason']
+                if "gemini-2.5-flash-lite" in reason_text.lower():
                     analysis_info += f"<div class='post-analysis'>🤖 Gemini 2.5で分析</div>"
-                elif "Gemini gemini-2.0-flash-lite" in post['reason']:
+                elif "gemini-2.0-flash-lite" in reason_text.lower():
                     analysis_info += f"<div class='post-analysis'>🤖 Gemini 2.0で分析</div>"
-                elif "フォールバック" in post['reason']:
+                elif "gemini" in reason_text.lower() and "フォールバック" not in reason_text:
+                    analysis_info += f"<div class='post-analysis'>🤖 Gemini AIで分析</div>"
+                elif "フォールバック" in reason_text or "キーワードベース" in reason_text:
                     analysis_info += f"<div class='post-analysis'>⚙️ 基本分析で処理</div>"
+                else:
+                    analysis_info += f"<div class='post-analysis'>🤖 AI分析</div>"
             
             # スマホ対応投稿表示（HTMLの改善）
             st.markdown(f"""
@@ -1075,14 +1100,14 @@ with right_col:
         # デバイス判定に基づく案内
         st.info("💬 まだ感想がありません。最初の投稿をお待ちしています！")
         
-        # デバイス別案内（レスポンシブ対応）
+        # デバイス別案内（レスポンシブ対応・背景色修正）
         st.markdown("""
-        <div style="background-color: #e3f2fd; padding: 15px; border-radius: 10px; margin: 10px 0;">
-            <h4>📱 投稿方法</h4>
-            <div class="pc-only" style="display: block;">
+        <div style="background-color: #fff3cd; padding: 15px; border-radius: 10px; margin: 10px 0; border: 1px solid #ffeaa7;">
+            <h4 style="color: #856404; margin-top: 0;">📱 投稿方法</h4>
+            <div class="pc-only" style="display: block; color: #856404;">
                 <strong>パソコンの方：</strong> 左側の「📝 感想を投稿しよう！」エリアから投稿できます
             </div>
-            <div class="mobile-only" style="display: none;">
+            <div class="mobile-only" style="display: none; color: #856404;">
                 <strong>スマホの方：</strong> 上にスクロールすると「📝 感想を投稿しよう！」エリアがあります
             </div>
         </div>
