@@ -439,14 +439,14 @@ def simple_sentiment_analysis_fallback(text):
 # Google Apps Script URL
 GAS_URL = st.secrets.get("gas_url", "")
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=10, show_spinner=False)  # キャッシュ時間を短縮、スピナー非表示
 def load_posts():
     """投稿を読み込み（キャッシュ付き）"""
     if not GAS_URL:
         return st.session_state.get('posts', [])
     
     try:
-        response = requests.get(GAS_URL, timeout=5)
+        response = requests.get(GAS_URL, timeout=3)  # タイムアウト短縮
         if response.status_code == 200:
             posts = response.json()
             for post in posts:
@@ -464,10 +464,13 @@ def load_posts():
                         post['time'] = datetime.now()
                 else:
                     post['time'] = datetime.now()
+            
+            # セッション状態にもバックアップ保存
+            st.session_state.posts_backup = posts
             return posts
-        return []
+        return st.session_state.get('posts_backup', [])
     except:
-        return st.session_state.get('posts', [])
+        return st.session_state.get('posts_backup', [])
 
 def save_post(nickname, text, score, emotion, reason, keywords, color):
     """投稿を保存（重複防止・エラーハンドリング強化）"""
@@ -571,8 +574,8 @@ with col_status2:
     if st.button("🔄 最新の感想を更新", help="最新の感想を今すぐ確認", key="main_refresh"):
         load_posts.clear()
         st.session_state.last_update = datetime.now()
+        # rerunを削除してメッセージのみ表示
         st.success("✅ 更新しました！")
-        st.rerun()
 
 # 成功メッセージの表示（投稿後）
 if st.session_state.show_success:
@@ -661,16 +664,17 @@ with left_col:
     input_valid = nickname and message and len(message.strip()) > 5
     char_count = len(message.strip()) if message else 0
     
-    # 入力状態の即座フィードバック（入力欄直下に配置）
+    # 入力状態の即座フィードバック（入力欄直下に配置・rerun削除）
+    feedback_placeholder = st.empty()
     if not input_valid:
         if not nickname:
-            st.warning("📝 ニックネームを入力してください")
+            feedback_placeholder.warning("📝 ニックネームを入力してください")
         elif not message:
-            st.warning("📝 感想を入力してください")
+            feedback_placeholder.warning("📝 感想を入力してください")
         elif char_count <= 5:
-            st.warning(f"📝 感想をもう少し詳しく書いてください（現在{char_count}文字、6文字以上必要）")
+            feedback_placeholder.warning(f"📝 感想をもう少し詳しく書いてください（現在{char_count}文字、6文字以上必要）")
     else:
-        st.success(f"✅ 入力完了（{char_count}文字）- AI分析の準備ができました！")
+        feedback_placeholder.success(f"✅ 入力完了（{char_count}文字）- AI分析の準備ができました！")
     
     # 感情分析ボタン（明示的な分析開始）
     col_analyze, col_reanalyze = st.columns([3, 1])
@@ -687,19 +691,16 @@ with left_col:
         # 再分析ボタンは入力が有効で、かつ分析済みの場合のみ有効
         reanalyze_enabled = input_valid and st.session_state.analysis_done and not st.session_state.is_posting
         if st.button("🔄 再分析", help="もう一度AI分析を実行", disabled=not reanalyze_enabled):
-            # 既存の分析結果をクリアして再分析
-            st.session_state.analysis_result = None
-            st.session_state.analysis_done = False
-            # 再分析処理を即座に実行
+            # 既存の分析結果をクリアして再分析（rerunを削除）
             with st.spinner("🤖 再分析中..."):
                 analysis_result = analyze_sentiment_with_llm(message, client, current_model)
                 st.session_state.analysis_result = analysis_result
                 st.session_state.analysis_done = True
-            st.rerun()
+                st.success("🔄 再分析完了！結果を確認してください")
     
     # 入力状態の表示を削除（上に移動済み）
     
-    # 感情分析実行
+    # 感情分析実行（rerun削除）
     if analyze_button and input_valid:
         # 分析処理をプログレスバー付きで実行
         progress_bar = st.progress(0)
@@ -722,7 +723,7 @@ with left_col:
         progress_bar.empty()
         status_text.empty()
         
-        st.rerun()
+        # rerunを削除してページ更新を回避
     
     # 分析結果の表示
     if st.session_state.analysis_done and st.session_state.analysis_result:
@@ -751,14 +752,14 @@ with left_col:
         with col_score:
             st.metric("満足度スコア", f"{score}点", emotion)
         with col_model:
-            # 使用モデルを表示（高校生にも分かりやすく）
+            # 使用モデルを表示（高校生にも分かりやすく・詳細表示）
             if client and "フォールバック" not in reason:
                 if current_model == "gemini-2.5-flash-lite":
                     st.success("🤖 Gemini 2.5")
                 elif current_model == "gemini-2.0-flash-lite":
                     st.info("🤖 Gemini 2.0")
                 else:
-                    st.success("🤖 AI分析")
+                    st.success("🤖 Gemini AI")
             else:
                 st.warning("⚙️ 基本分析")
         
@@ -838,7 +839,21 @@ with left_col:
                     
                     progress_bar.empty()
                     status_text.empty()
-                    st.rerun()
+                    
+                    # rerunを削除して、代わりに成功メッセージのみ表示
+                    st.session_state.show_success = True
+                    st.balloons()
+                    
+                    # フォームクリアのみ実行（rerun削除）
+                    st.session_state.analysis_result = None
+                    st.session_state.analysis_done = False
+                    st.session_state.is_posting = False
+                    
+                    # 入力欄クリア
+                    if "nickname_input" in st.session_state:
+                        del st.session_state["nickname_input"]
+                    if "message_input" in st.session_state:
+                        del st.session_state["message_input"]
                 else:
                     progress_bar.empty()
                     status_text.empty()
@@ -871,8 +886,8 @@ with right_col:
         if st.button("🔄 更新", help="最新の感想を取得", key="posts_refresh"):
             load_posts.clear()
             st.session_state.last_update = datetime.now()
+            # rerunを削除
             st.success("✅ 更新完了")
-            st.rerun()
     
     if posts:
         # 統計
@@ -908,8 +923,11 @@ with right_col:
                 except:
                     post['time'] = datetime.now()
         
-        # 新しい順にソート（降順）
+        # 新しい順にソート（降順）- タイムスタンプベースの正確なソート
         recent_posts = sorted(posts, key=lambda x: x.get('time', datetime.min), reverse=True)[:10]
+        
+        # 現在時刻を一度だけ取得
+        current_time = datetime.now()
         
         for i, post in enumerate(recent_posts):
             post_time = post.get('time')
@@ -927,12 +945,11 @@ with right_col:
             elif not isinstance(post_time, datetime):
                 post_time = datetime.now()
             
-            # 時間差計算（正確な計算）
-            now = datetime.now()
-            diff = now - post_time
+            # 時間差計算（固定時刻を使用）
+            diff = current_time - post_time
             
             # より正確な時間表示
-            total_seconds = int(diff.total_seconds())
+            total_seconds = max(0, int(diff.total_seconds()))  # 負の値を防ぐ
             if total_seconds < 60:
                 time_str = f"{total_seconds}秒前"
             elif total_seconds < 3600:
@@ -1136,15 +1153,13 @@ with right_col:
         AIがあなたの感情を詳しく分析してくれます。
         """)
 
-# 自動更新処理（非ブロッキング）
+# 自動更新処理（非ブロッキング・rerun削除）
 if st.session_state.auto_update_enabled:
     time_since_update = (datetime.now() - st.session_state.last_update).total_seconds()
     if time_since_update >= 30:
+        # 自動更新はキャッシュクリアのみで、rerunはしない
         load_posts.clear()
         st.session_state.last_update = datetime.now()
-        st.info("🔄 新しい感想をチェック中...")
-        time.sleep(1)
-        st.rerun()
 
 # フッター
 st.markdown("---")
