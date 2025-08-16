@@ -143,8 +143,8 @@ if 'analysis_result' not in st.session_state:
 if 'analysis_done' not in st.session_state:
     st.session_state.analysis_done = False
 
-# デバッグモード切り替え（問題解決後は無効化）
-DEBUG_MODE = st.secrets.get("debug_mode", False)  # 元に戻す
+# デバッグモード切り替え（問題調査用に一時的に有効化）
+DEBUG_MODE = st.secrets.get("debug_mode", True)  # 一時的にTrueに設定
 
 # Gemini API設定（新SDK対応）
 @st.cache_resource
@@ -938,7 +938,16 @@ with right_col:
                 except:
                     post['time'] = datetime.now()
         
-        # 新しい順にソート（降順）- 正確なソート
+        # 新しい順にソート（降順）- デバッグ情報付き
+        # まずソート前の確認（常に表示）
+        if posts:
+            st.info("🔍 ソート前の投稿順序:")
+            for i, p in enumerate(posts[:3]):
+                user_name = p.get('user', 'unknown')
+                post_time = p.get('time', 'no time')
+                st.write(f"{i+1}. {user_name} - {post_time}")
+        
+        # 時刻でソート（確実に降順）
         try:
             recent_posts = sorted(
                 posts, 
@@ -948,6 +957,14 @@ with right_col:
         except Exception as sort_error:
             # ソートエラー時はそのまま使用
             recent_posts = posts[:10]
+            st.error(f"ソートエラー: {sort_error}")
+        
+        if recent_posts:
+            st.info("🔍 ソート後の投稿順序:")
+            for i, p in enumerate(recent_posts[:3]):
+                user_name = p.get('user', 'unknown')
+                post_time = p.get('time', 'no time')
+                st.write(f"{i+1}. {user_name} - {post_time}")
         
         # 現在時刻を一度だけ取得
         current_time = datetime.now()
@@ -1006,20 +1023,26 @@ with right_col:
                     analysis_info += f"<div class='post-analysis'>⚙️ 基本分析で処理</div>"
                 else:
                     analysis_info += f"<div class='post-analysis'>🤖 {model_used}で分析</div>"
+                st.success(f"✅ model_used使用: {model_used}")
             elif post.get('reason'):
                 # 古い投稿でmodel_usedがない場合、reasonから推測
                 reason_text = post['reason']
+                st.info(f"🔍 reasonから推測: '{reason_text[:50]}...'")
                 
                 # reasonからの推測（フォールバック）
                 if "gemini" in reason_text.lower() and "フォールバック" not in reason_text:
                     analysis_info += f"<div class='post-analysis'>🤖 Gemini AIで分析</div>"
+                    st.warning("⚠️ reasonから推測: Gemini AI")
                 elif "フォールバック" in reason_text or "キーワードベース" in reason_text:
                     analysis_info += f"<div class='post-analysis'>⚙️ 基本分析で処理</div>"
+                    st.warning("⚠️ reasonから推測: 基本分析")
                 else:
                     analysis_info += f"<div class='post-analysis'>🤖 AI分析</div>"
+                    st.error(f"❌ 推測不可: AI分析")
             else:
                 # reasonもない古い投稿
                 analysis_info += f"<div class='post-analysis'>🤖 AI分析（詳細不明）</div>"
+                st.warning("⚠️ 情報不足: 詳細不明")
             
             # スマホ対応投稿表示（HTMLの改善）
             st.markdown(f"""
