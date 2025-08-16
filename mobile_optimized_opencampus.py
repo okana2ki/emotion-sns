@@ -143,8 +143,8 @@ if 'analysis_result' not in st.session_state:
 if 'analysis_done' not in st.session_state:
     st.session_state.analysis_done = False
 
-# デバッグモード切り替え（時刻問題調査のため一時的に有効化）
-DEBUG_MODE = st.secrets.get("debug_mode", True)  # 元に戻す
+# デバッグモード切り替え（時刻問題調査のため強制有効化）
+DEBUG_MODE = True  # 強制的にTrueに設定  # 元に戻す
 
 # Gemini API設定（新SDK対応）
 @st.cache_resource
@@ -450,38 +450,58 @@ def load_posts():
         if response.status_code == 200:
             posts = response.json()
             for post in posts:
-                # 時刻データの処理を完全に見直し
-                time_value = post.get('time')
-                
                 if time_value:
                     try:
                         if isinstance(time_value, str):
-                            # 文字列の場合のみ変換を試行
+                            # デバッグ: 元の時刻文字列を記録
+                            if DEBUG_MODE:
+                                st.write(f"🔍 元の時刻文字列: '{time_value}'")
+                            
+                            # Google Sheetsの複数の時刻フォーマットに対応
                             time_str = time_value.replace('Z', '')
-                            if '.' in time_str:
-                                post['time'] = datetime.fromisoformat(time_str.split('.')[0])
+                            
+                            # パターン1: "2025-08-16T13:44:03" 形式
+                            if 'T' in time_str:
+                                if '.' in time_str:
+                                    post['time'] = datetime.fromisoformat(time_str.split('.')[0])
+                                else:
+                                    post['time'] = datetime.fromisoformat(time_str)
+                            # パターン2: "2025/08/16 13:44:03" 形式
+                            elif '/' in time_str and ' ' in time_str:
+                                # Google Sheetsの日付形式を変換
+                                try:
+                                    post['time'] = datetime.strptime(time_str, '%Y/%m/%d %H:%M:%S')
+                                except ValueError:
+                                    # 別の形式を試行
+                                    post['time'] = datetime.strptime(time_str, '%m/%d/%Y %H:%M:%S')
                             else:
+                                # その他の形式
                                 post['time'] = datetime.fromisoformat(time_str)
+                            
+                            # デバッグ: 変換後の時刻を記録
+                            if DEBUG_MODE:
+                                st.write(f"🔍 変換後の時刻: {post['time']}")
+                                
                         elif isinstance(time_value, datetime):
                             # 既にdatetimeオブジェクトの場合はそのまま保持
+                            if DEBUG_MODE:
+                                st.write(f"🔍 datetime保持: {time_value}")
                             pass
                         else:
                             # その他の型の場合は現在時刻（新規投稿として扱う）
+                            if DEBUG_MODE:
+                                st.write(f"🔍 型不明で現在時刻設定: {type(time_value)}")
                             post['time'] = datetime.now()
                     except Exception as time_error:
                         # 変換エラー時のデバッグ情報
                         if DEBUG_MODE:
-                            st.error(f"時刻変換エラー: {time_error} - 元データ: {time_value}")
-                        # エラー時は元の値をそのまま保持（変換しない）
-                        if isinstance(time_value, str):
-                            try:
-                                # 最低限の変換を試行
-                                post['time'] = datetime.fromisoformat(time_value.replace('Z', '').split('.')[0])
-                            except:
-                                # 最終的に失敗した場合のみ現在時刻
-                                post['time'] = datetime.now()
+                            st.error(f"🔍 時刻変換エラー: {time_error} - 元データ: '{time_value}' (型: {type(time_value)})")
+                        # エラー時は現在時刻
+                        post['time'] = datetime.now()
                 else:
                     # timeフィールドが存在しない場合のみ現在時刻
+                    if DEBUG_MODE:
+                        st.write("🔍 timeフィールドなし - 現在時刻設定")
                     post['time'] = datetime.now()
             
             # デバッグ: 読み込み後の時刻確認
